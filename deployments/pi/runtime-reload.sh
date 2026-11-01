@@ -20,7 +20,8 @@ bash deployments/pi/download-models.sh
 log "pnpm install (Web-API)"
 export CI=1
 corepack enable
-pnpm install --frozen-lockfile --prod --filter "@sprachassistent/api..."
+# Not --prod: the framework packages list express as optional peer plus dev dependency.
+pnpm install --frozen-lockfile --filter "@sprachassistent/api..."
 
 log "Web -> $WEB_ROOT"
 mkdir -p "$WEB_ROOT"
