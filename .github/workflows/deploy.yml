@@ -21,16 +21,18 @@ jobs:
         with:
           path: |
             ~/cargo-registry
+            ~/sherpa-cache
             target
-          key: pi-${{ hashFiles('Cargo.lock', 'deployments/build/Dockerfile') }}
-          restore-keys: pi-
+          key: pi-v2-${{ hashFiles('Cargo.lock', 'deployments/build/Dockerfile') }}
+          restore-keys: pi-v2-
 
       - name: Cross-compile for the Raspberry Pi
         run: |
           docker build -t sprachassistent-build deployments/build
-          mkdir -p ~/cargo-registry
-          docker run --rm -v "$PWD:/src" -v ~/cargo-registry:/usr/local/cargo/registry sprachassistent-build
-          sudo chown -R "$(id -u):$(id -g)" target bin ~/cargo-registry
+          mkdir -p ~/cargo-registry ~/sherpa-cache
+          docker run --rm -v "$PWD:/src" -v ~/cargo-registry:/usr/local/cargo/registry \
+            -v ~/sherpa-cache:/root/.cache sprachassistent-build
+          sudo chown -R "$(id -u):$(id -g)" target bin ~/cargo-registry ~/sherpa-cache
 
       - name: Deploy via SSH (rsync + runtime reload)
         env:
