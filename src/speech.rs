@@ -30,18 +30,34 @@ pub fn is_hallucination(text: &str) -> bool {
         .any(|h| t.contains(h))
 }
 
+/// Whisper's encoder always works on a 30 s window (1500 frames, 50 per second of audio).
+/// Limiting it to the recording plus a margin makes short questions several times faster.
+#[cfg_attr(not(feature = "whisper"), allow(dead_code))]
+fn audio_ctx(samples_16k: usize) -> i32 {
+    const FRAMES_PER_SECOND: usize = 50;
+    const MARGIN: usize = 128;
+    let frames = samples_16k * FRAMES_PER_SECOND / 16_000 + MARGIN;
+    frames.min(1500) as i32
+}
+
 #[cfg(feature = "whisper")]
 pub use whisper::WhisperStt;
 
 #[cfg(feature = "whisper")]
 mod whisper {
     use std::path::Path;
+    use std::sync::Mutex;
 
     use anyhow::{anyhow, Result};
-    use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+    use whisper_rs::{
+        FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+    };
 
     pub struct WhisperStt {
-        ctx: WhisperContext,
+        // Created once: a fresh state allocates several hundred MB of buffers per request,
+        // which on the Pi costs seconds of page faults and memory compaction.
+        state: Mutex<WhisperState>,
+        _ctx: WhisperContext,
         threads: i32,
         beam_size: i32,
         language: String,
@@ -57,10 +73,14 @@ mod whisper {
                     "Whisper-Modell {path} fehlt (deployments/pi/download-models.sh)"
                 ));
             }
-            let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
+            let mut ctx_params = WhisperContextParameters::default();
+            ctx_params.flash_attn(true);
+            let ctx = WhisperContext::new_with_params(path, ctx_params)
                 .map_err(|e| anyhow!("Whisper-Modell laden: {e:?}"))?;
+            let state = ctx.create_state().map_err(|e| anyhow!("{e:?}"))?;
             Ok(Self {
-                ctx,
+                state: Mutex::new(state),
+                _ctx: ctx,
                 threads,
                 beam_size,
                 language: language.to_string(),
@@ -87,8 +107,9 @@ mod whisper {
             params.set_print_realtime(false);
             params.set_print_special(false);
             params.set_print_timestamps(false);
+            params.set_audio_ctx(super::audio_ctx(audio.len()));
 
-            let mut state = self.ctx.create_state().map_err(|e| anyhow!("{e:?}"))?;
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state
                 .full(params, audio)
                 .map_err(|e| anyhow!("Whisper: {e:?}"))?;
@@ -186,5 +207,11 @@ mod tests {
         ));
         assert!(super::is_hallucination(""));
         assert!(!super::is_hallucination("Wie wird das Wetter morgen?"));
+    }
+
+    #[test]
+    fn audio_ctx_follows_the_recording_length() {
+        assert_eq!(super::audio_ctx(3 * 16_000), 278);
+        assert_eq!(super::audio_ctx(60 * 16_000), 1500);
     }
 }

@@ -18,7 +18,11 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
     CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ \
     AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar \
-    BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu="--sysroot=/usr/aarch64-linux-gnu"
+    BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu="--sysroot=/usr/aarch64-linux-gnu" \
+    # Pi 5 CPU: enables the dotprod/fp16 kernels of whisper.cpp (about a third faster than generic
+    # armv8). The binary then no longer runs on a Pi 4 (Cortex-A72).
+    CFLAGS_aarch64_unknown_linux_gnu="-mcpu=cortex-a76" \
+    CXXFLAGS_aarch64_unknown_linux_gnu="-mcpu=cortex-a76"
 
 WORKDIR /src
 CMD ["bash", "deployments/build/build-pi.sh"]
