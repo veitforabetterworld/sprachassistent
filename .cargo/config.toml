@@ -1,0 +1,4 @@
+# sherpa-onnx comes as shared libraries (libsherpa-onnx-c-api.so, libonnxruntime.so); the Pi build
+# ships them in bin/lib next to the binary.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN/lib"]

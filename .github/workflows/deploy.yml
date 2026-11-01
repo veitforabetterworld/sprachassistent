@@ -1,0 +1,58 @@
+name: Deploy
+
+on:
+  push:
+    branches: [deploy]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-pi-sprachassistent
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/cargo-registry
+            target
+          key: pi-${{ hashFiles('Cargo.lock', 'deployments/build/Dockerfile') }}
+          restore-keys: pi-
+
+      - name: Cross-compile for the Raspberry Pi
+        run: |
+          docker build -t sprachassistent-build deployments/build
+          mkdir -p ~/cargo-registry
+          docker run --rm -v "$PWD:/src" -v ~/cargo-registry:/usr/local/cargo/registry sprachassistent-build
+          sudo chown -R "$(id -u):$(id -g)" target bin ~/cargo-registry
+
+      - name: Deploy via SSH (rsync + runtime reload)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_USER" ] || [ -z "$SSH_KEY" ]; then
+            echo "Secrets SSH_HOST, SSH_USER, SSH_PRIVATE_KEY must be set in the production environment."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          TARGET="${DEPLOY_PATH:-/root/sprachassistent}"
+          SSH_OPTS="-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes"
+          # Only the binary with its libraries and the deploy scripts go to the Pi;
+          # .env, data/ and models/ stay there.
+          rsync -az -e "ssh $SSH_OPTS" --relative \
+            bin/ deployments/pi/ \
+            "${SSH_USER}@${SSH_HOST}:${TARGET}/"
+          ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" \
+            "cd ${TARGET} && DEPLOY_COMMIT=${GITHUB_SHA} bash deployments/pi/runtime-reload.sh"

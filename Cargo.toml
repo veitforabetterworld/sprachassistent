@@ -1,0 +1,43 @@
+[package]
+name = "sprachassistent"
+version = "0.1.0"
+edition = "2021"
+description = "Sprachassistent mit Persoenlichkeit und Gedaechtnis: ESP32 als Mikrofon/Lautsprecher, Server auf dem Raspberry Pi"
+publish = false
+
+[features]
+default = ["whisper", "piper"]
+# Spracherkennung mit whisper.cpp
+whisper = ["dep:whisper-rs"]
+# Sprachausgabe mit Piper-Stimmen ueber sherpa-onnx (vorgebaute Bibliothek, liegt in bin/lib)
+piper = ["dep:sherpa-rs"]
+
+[dependencies]
+anyhow = "1"
+async-stream = "0.3"
+async-trait = "0.1"
+axum = "0.8"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dotenvy = "0.15"
+futures-util = "0.3"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "net", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+whisper-rs = { version = "0.16", optional = true }
+sherpa-rs = { version = "0.6", optional = true, default-features = false, features = ["tts", "download-binaries"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = "thin"
+strip = true

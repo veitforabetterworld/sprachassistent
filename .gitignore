@@ -1,0 +1,12 @@
+.env
+/target/
+/bin/
+*.log
+
+# Laufzeitdaten und heruntergeladene Modelle
+/data/
+/models/
+
+# Firmware
+firmware/.pio/
+firmware/include/secrets.h
