@@ -1,19 +1,30 @@
 #!/bin/bash
-# Runtime deploy on the Raspberry Pi, called by .github/workflows/deploy.yml after the
-# cross-compiled binary was rsynced. Nothing is compiled here.
+# Runtime deploy on the Raspberry Pi, called by .github/workflows/deploy.yml after the CI build was rsynced
+# (Rust binary in bin/, built apps and framework packages). Nothing is compiled here.
 set -euo pipefail
 REPO="${SPRACHASSISTENT_REPO:-/root/sprachassistent}"
+WEB_ROOT=/var/www/sprachassistent/app
 cd "$REPO"
 
 log() { echo "[sprachassistent-runtime] $*"; }
 
-[ -x bin/sprachassistent ] && [ -f bin/lib/libsherpa-onnx-c-api.so ] \
-  || { echo "ERROR: bin/ unvollstaendig, zuerst in CI bauen und rsyncen." >&2; exit 1; }
-[ -f .env ] || { echo "ERROR: $REPO/.env fehlt, zuerst deployments/pi/bootstrap.sh ausfuehren." >&2; exit 1; }
-API_PORT="$(sed -n 's/^API_PORT=//p' .env)"
+for f in bin/sprachassistent bin/lib/libsherpa-onnx-c-api.so apps/api/dist/index.js apps/web/dist/index.html; do
+  [ -f "$f" ] || { echo "ERROR: $f fehlt, zuerst in CI bauen und rsyncen." >&2; exit 1; }
+done
+grep -q '^DATABASE_URL=' .env 2>/dev/null \
+  || { echo "ERROR: DATABASE_URL fehlt in $REPO/.env, zuerst deployments/pi/bootstrap.sh ausfuehren." >&2; exit 1; }
 
 log "Sprachmodelle"
 bash deployments/pi/download-models.sh
+
+log "pnpm install (Web-API)"
+export CI=1
+corepack enable
+pnpm install --frozen-lockfile --prod --filter "@sprachassistent/api..."
+
+log "Web -> $WEB_ROOT"
+mkdir -p "$WEB_ROOT"
+rsync -a --delete apps/web/dist/ "$WEB_ROOT/"
 
 log "nginx-Site"
 # A config that fails nginx -t is rolled back, so it never blocks the next reload of the other sites.
@@ -30,19 +41,25 @@ rm -f "${NGINX_FILES[@]/%/.bak}"
 systemctl reload nginx
 
 log "pm2 reload"
+# The first version ran the voice server under this name.
+pm2 delete sprachassistent-api >/dev/null 2>&1 || true
 pm2 startOrReload deployments/pi/ecosystem.config.cjs --update-env
 pm2 save
 
 log "Health check"
-# Loading whisper and piper takes a few seconds on the Pi.
-for _ in $(seq 1 60); do
-  if HEALTH="$(curl -fsS --max-time 2 "http://127.0.0.1:${API_PORT:-3020}/v1/health" 2>/dev/null)"; then
-    log "$HEALTH"
+# Loading whisper takes a few seconds on the Pi.
+for _ in $(seq 1 90); do
+  VOICE="$(curl -fsS --max-time 2 http://127.0.0.1:3020/v1/health 2>/dev/null || true)"
+  WEB="$(curl -fsS --max-time 2 http://127.0.0.1:3022/v1/setup 2>/dev/null || true)"
+  if [ -n "$VOICE" ] && [ -n "$WEB" ]; then
+    log "voice: $VOICE"
+    log "web: $WEB"
     log "fertig $(date -Is), Commit ${DEPLOY_COMMIT:-unknown}"
     exit 0
   fi
   sleep 1
 done
-echo "ERROR: Server antwortet nicht auf :${API_PORT:-3020}/v1/health, Logs:" >&2
-pm2 logs sprachassistent-api --lines 60 --nostream >&2 || true
+echo "ERROR: Server antworten nicht (voice :3020 '${VOICE}', web :3022 '${WEB}'), Logs:" >&2
+pm2 logs sprachassistent-voice --lines 40 --nostream >&2 || true
+pm2 logs sprachassistent-web --lines 40 --nostream >&2 || true
 exit 1

@@ -8,12 +8,12 @@
 #define SERVER_HOST "sprachassistent.plenivo.de"
 #define SERVER_PORT 443
 #define USE_TLS 1
-// ... oder direkt im Heimnetz (schneller, auf dem Pi dann API_HOST=0.0.0.0 setzen):
+// ... oder direkt im Heimnetz (schneller, auf dem Pi dann API_HOST=0.0.0.0 in der .env setzen):
 // #define SERVER_HOST "192.168.178.50"
 // #define SERVER_PORT 3020
 // #define USE_TLS 0
 
-// API_KEY aus der .env auf dem Pi
+// ESP-Schluessel aus dem Adminbereich (Tab ESP-Schluessel, beginnt mit spa_)
 #define API_KEY "..."
 
 // Root-Zertifikat fuer HTTPS: Inhalt von https://letsencrypt.org/certs/isrgrootx1.pem einfuegen.

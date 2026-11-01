@@ -1,11 +1,19 @@
 #!/bin/bash
-# Downloads the speech models into models/ (once, about 280 MB). Existing files are kept.
-#   WHISPER_MODEL_NAME=ggml-base-q5_1.bin bash deployments/pi/download-models.sh
+# Downloads the speech models into models/ (once, about 450 MB). Existing files are kept.
+# Each device picks one of the voices in the admin area.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 WHISPER_MODEL_NAME="${WHISPER_MODEL_NAME:-ggml-small-q5_1.bin}"
-PIPER_VOICE="${PIPER_VOICE:-vits-piper-de_DE-thorsten-medium}"
+# German Piper voices as sherpa-onnx archives (vits-piper-<name>.tar.bz2).
+VOICES=(
+  de_DE-thorsten-medium
+  de_DE-karlsson-low
+  de_DE-pavoque-low
+  de_DE-kerstin-low
+  de_DE-eva_k-x_low
+  de_DE-ramona-low
+)
 
 log() { echo "[sprachassistent-models] $*"; }
 
@@ -17,11 +25,13 @@ if [ ! -f "models/whisper/$WHISPER_MODEL_NAME" ]; then
   mv "models/whisper/$WHISPER_MODEL_NAME.part" "models/whisper/$WHISPER_MODEL_NAME"
 fi
 
-if [ ! -d "models/$PIPER_VOICE" ]; then
-  log "Piper-Stimme $PIPER_VOICE"
-  curl -fL --retry 3 \
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/$PIPER_VOICE.tar.bz2" \
+for voice in "${VOICES[@]}"; do
+  dir="vits-piper-$voice"
+  [ -f "models/$dir/tokens.txt" ] && continue
+  log "Stimme $voice"
+  rm -rf "models/$dir"
+  curl -fL --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/$dir.tar.bz2" \
     | tar -xj -C models
-fi
+done
 
 log "fertig: $(du -sh models | cut -f1)"

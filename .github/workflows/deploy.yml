@@ -16,6 +16,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Build web API and admin web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:deps
+          pnpm build
 
       - uses: actions/cache@v4
         with:
@@ -51,10 +66,17 @@ jobs:
           ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
           TARGET="${DEPLOY_PATH:-/root/sprachassistent}"
           SSH_OPTS="-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes"
-          # Only the binary with its libraries and the deploy scripts go to the Pi;
-          # .env, data/ and models/ stay there.
-          rsync -az -e "ssh $SSH_OPTS" --relative \
-            bin/ deployments/pi/ \
-            "${SSH_USER}@${SSH_HOST}:${TARGET}/"
+          # Built repo without dependencies; server-only state is excluded, so --delete leaves it alone.
+          rsync -az --delete -e "ssh $SSH_OPTS" \
+            --exclude node_modules \
+            --exclude .git \
+            --exclude .github \
+            --exclude '/target' \
+            --exclude '/firmware/.pio' \
+            --exclude '/.env' \
+            --exclude '/.env.v1.bak' \
+            --exclude '/data' \
+            --exclude '/models' \
+            ./ "${SSH_USER}@${SSH_HOST}:${TARGET}/"
           ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" \
             "cd ${TARGET} && DEPLOY_COMMIT=${GITHUB_SHA} bash deployments/pi/runtime-reload.sh"

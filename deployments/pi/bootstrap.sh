@@ -2,8 +2,9 @@
 # One-time setup of sprachassistent.plenivo.de on the Raspberry Pi (next to plenivo and
 # hochwasserdienst). Run as root from a checkout or copy of the repo:
 #   DEPLOY_PUBKEY="ssh-ed25519 AAAA... github-actions-sprachassistent" bash deployments/pi/bootstrap.sh
-# Idempotent: existing .env, data, models, DNS record, certificate and keys are kept.
+# Idempotent: existing database, data, models, DNS record, certificate and keys are kept.
 # Afterwards every push to the deploy branch deploys via .github/workflows/deploy.yml.
+# Only the database connection goes into .env; everything else is set in the admin area.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,41 +23,33 @@ log() { echo "[sprachassistent-bootstrap] $*"; }
 log "Pakete"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq rsync curl bzip2
+apt-get install -y -qq rsync curl bzip2 postgresql
 
-mkdir -p "$REPO/data" "$REPO/bin"
+mkdir -p "$REPO/data" "$REPO/bin" /var/www/sprachassistent/app
 if [ "$SCRIPT_DIR" != "$REPO/deployments/pi" ]; then
   rsync -a "$SCRIPT_DIR/../../deployments/" "$REPO/deployments/"
 fi
 
-if [ ! -f "$REPO/.env" ]; then
-  log ".env anlegen"
-  API_KEY="$(openssl rand -hex 24)"
+log "Datenbank"
+if grep -q '^DATABASE_URL=' "$REPO/.env" 2>/dev/null; then
+  log ".env hat DATABASE_URL, Datenbank-Passwort bleibt"
+else
+  if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='sprachassistent'" | grep -q 1; then
+    echo "Rolle sprachassistent existiert, aber DATABASE_URL fehlt in $REPO/.env. Von Hand eintragen." >&2
+    exit 1
+  fi
+  DB_PASSWORD="$(openssl rand -hex 24)"
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -q -c "CREATE ROLE sprachassistent LOGIN PASSWORD '${DB_PASSWORD}'"
+  # Settings of the first version (API keys, providers) now live in the database; the old file stays as backup.
+  [ -f "$REPO/.env" ] && mv "$REPO/.env" "$REPO/.env.v1.bak"
   umask 077
   cat >"$REPO/.env" <<EOF
-API_HOST=127.0.0.1
-API_PORT=3020
-API_KEY=${API_KEY}
-DATA_DIR=${REPO}/data
-WHISPER_MODEL=${REPO}/models/whisper/ggml-small-q5_1.bin
-WHISPER_THREADS=4
-WHISPER_BEAM_SIZE=1
-WHISPER_LANGUAGE=de
-PIPER_MODEL=${REPO}/models/vits-piper-de_DE-thorsten-medium/de_DE-thorsten-medium.onnx
-PIPER_THREADS=2
-PIPER_SPEED=1.0
-LLM_PROVIDERS=groq,gemini
-GROQ_API_KEY=
-GROQ_MODEL=llama-3.3-70b-versatile
-GEMINI_API_KEY=
-GEMINI_MODEL=gemini-2.5-flash-lite
-HISTORY_MESSAGES=12
-MEMORY_EXTRACTION=true
-RUST_LOG=info
+DATABASE_URL=postgres://sprachassistent:${DB_PASSWORD}@127.0.0.1:5432/sprachassistent
 EOF
   umask 022
-  log "API_KEY fuer den ESP32 (firmware/include/secrets.h): ${API_KEY}"
-  log "GROQ_API_KEY und GEMINI_API_KEY in $REPO/.env eintragen."
+fi
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='sprachassistent'" | grep -q 1; then
+  sudo -u postgres createdb -O sprachassistent sprachassistent
 fi
 
 log "Sprachmodelle"
@@ -99,4 +92,4 @@ nginx -t
 systemctl reload nginx
 
 log "Fertig. GitHub Environment production: SSH_HOST=${CNAME_TARGET%.} SSH_USER=root DEPLOY_PATH=${REPO}"
-log "Danach Push auf den Branch deploy, das baut und startet den Server."
+log "Danach Push auf den Branch deploy; dann https://${HOST} oeffnen, das erste Konto wird Admin."

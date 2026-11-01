@@ -10,8 +10,26 @@ pub trait SpeechToText: Send + Sync {
 
 pub trait TextToSpeech: Send + Sync {
     fn sample_rate(&self) -> u32;
-    /// Mono f32 samples at `sample_rate()`.
-    fn synthesize(&self, text: &str) -> Result<Vec<f32>>;
+    /// Mono f32 samples at `sample_rate()`; `speed` above 1 speaks faster.
+    fn synthesize(&self, text: &str, speed: f32) -> Result<Vec<f32>>;
+}
+
+/// The installed voices; each device picks one by id.
+pub trait VoiceBank: Send + Sync {
+    /// Ids of the installed voices, sorted.
+    fn list(&self) -> Vec<String>;
+    /// Loads the voice on first use.
+    fn voice(&self, id: &str) -> Result<std::sync::Arc<dyn TextToSpeech>>;
+}
+
+/// "vits-piper-de_DE-thorsten-medium" -> "thorsten (de_DE, medium)".
+pub fn voice_label(id: &str) -> String {
+    let name = id.strip_prefix("vits-piper-").unwrap_or(id);
+    let parts: Vec<&str> = name.split('-').collect();
+    match parts.as_slice() {
+        [lang, speaker, quality] => format!("{speaker} ({lang}, {quality})"),
+        _ => name.to_string(),
+    }
 }
 
 /// Whisper invents text on silence or noise, typically subtitle credits from its training data.
@@ -124,44 +142,89 @@ mod whisper {
 }
 
 #[cfg(feature = "piper")]
-pub use piper::PiperTts;
+pub use piper::PiperVoices;
 
 #[cfg(feature = "piper")]
 mod piper {
-    use std::path::Path;
-    use std::sync::Mutex;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
 
     use anyhow::{anyhow, Result};
     use sherpa_rs::tts::{VitsTts, VitsTtsConfig};
     use sherpa_rs::OnnxConfig;
 
+    use super::TextToSpeech;
+
+    /// Piper voices in the layout of the sherpa-onnx `vits-piper-*` archives: one directory per voice with
+    /// the .onnx model, `tokens.txt` and `espeak-ng-data/`.
+    pub struct PiperVoices {
+        dir: PathBuf,
+        threads: i32,
+        loaded: Mutex<HashMap<String, Arc<PiperTts>>>,
+    }
+
+    impl PiperVoices {
+        pub fn new(dir: PathBuf, threads: i32) -> Self {
+            Self {
+                dir,
+                threads,
+                loaded: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl super::VoiceBank for PiperVoices {
+        fn list(&self) -> Vec<String> {
+            let mut ids: Vec<String> = std::fs::read_dir(&self.dir)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter(|e| e.path().join("tokens.txt").exists())
+                        .filter_map(|e| e.file_name().into_string().ok())
+                        .filter(|name| name.starts_with("vits-piper-"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ids.sort();
+            ids
+        }
+
+        fn voice(&self, id: &str) -> Result<Arc<dyn TextToSpeech>> {
+            if !self.list().iter().any(|v| v == id) {
+                return Err(anyhow!("Stimme {id} ist nicht installiert"));
+            }
+            let mut loaded = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(voice) = loaded.get(id) {
+                return Ok(voice.clone());
+            }
+            let started = std::time::Instant::now();
+            let voice = Arc::new(PiperTts::load(&self.dir.join(id), self.threads)?);
+            tracing::info!(
+                "Stimme {id} geladen in {:.1} s",
+                started.elapsed().as_secs_f32()
+            );
+            loaded.insert(id.to_string(), voice.clone());
+            Ok(voice)
+        }
+    }
+
     pub struct PiperTts {
         tts: Mutex<VitsTts>,
         sample_rate: u32,
-        speed: f32,
     }
 
     impl PiperTts {
-        /// `model` is the voice's .onnx; `tokens.txt` and `espeak-ng-data/` sit next to it
-        /// (layout of the sherpa-onnx `vits-piper-*` archives).
-        pub fn load(model: &Path, threads: i32, speed: f32) -> Result<Self> {
-            let dir = model
-                .parent()
-                .ok_or_else(|| anyhow!("PIPER_MODEL ohne Verzeichnis"))?;
-            let tokens = dir.join("tokens.txt");
-            let data_dir = dir.join("espeak-ng-data");
-            for p in [model, tokens.as_path(), data_dir.as_path()] {
-                if !p.exists() {
-                    return Err(anyhow!(
-                        "Piper-Stimme unvollstaendig, {} fehlt (deployments/pi/download-models.sh)",
-                        p.display()
-                    ));
-                }
-            }
+        fn load(dir: &Path, threads: i32) -> Result<Self> {
+            let model = std::fs::read_dir(dir)?
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.extension().is_some_and(|ext| ext == "onnx"))
+                .ok_or_else(|| anyhow!("{}: kein .onnx-Modell", dir.display()))?;
             let config = VitsTtsConfig {
                 model: model.display().to_string(),
-                tokens: tokens.display().to_string(),
-                data_dir: data_dir.display().to_string(),
+                tokens: dir.join("tokens.txt").display().to_string(),
+                data_dir: dir.join("espeak-ng-data").display().to_string(),
                 length_scale: 1.0,
                 onnx_config: OnnxConfig {
                     provider: "cpu".into(),
@@ -173,25 +236,24 @@ mod piper {
             let mut tts = VitsTts::new(config);
             // The sample rate is only reported with generated audio; this also warms up the model.
             let warmup = tts
-                .create("Hallo.", 0, speed)
+                .create("Hallo.", 0, 1.0)
                 .map_err(|e| anyhow!("Piper: {e}"))?;
             Ok(Self {
                 tts: Mutex::new(tts),
                 sample_rate: warmup.sample_rate,
-                speed,
             })
         }
     }
 
-    impl super::TextToSpeech for PiperTts {
+    impl TextToSpeech for PiperTts {
         fn sample_rate(&self) -> u32 {
             self.sample_rate
         }
 
-        fn synthesize(&self, text: &str) -> Result<Vec<f32>> {
+        fn synthesize(&self, text: &str, speed: f32) -> Result<Vec<f32>> {
             let mut tts = self.tts.lock().unwrap_or_else(|e| e.into_inner());
             let audio = tts
-                .create(text, 0, self.speed)
+                .create(text, 0, speed)
                 .map_err(|e| anyhow!("Piper: {e}"))?;
             Ok(audio.samples)
         }
@@ -207,6 +269,14 @@ mod tests {
         ));
         assert!(super::is_hallucination(""));
         assert!(!super::is_hallucination("Wie wird das Wetter morgen?"));
+    }
+
+    #[test]
+    fn labels_voices() {
+        assert_eq!(
+            super::voice_label("vits-piper-de_DE-thorsten-medium"),
+            "thorsten (de_DE, medium)"
+        );
     }
 
     #[test]

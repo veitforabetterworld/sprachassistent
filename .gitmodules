@@ -1,0 +1,4 @@
+[submodule "veit-framework"]
+	path = veit-framework
+	url = https://github.com/veitforabetterworld/veit-framework.git
+	branch = development

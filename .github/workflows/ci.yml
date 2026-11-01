@@ -6,22 +6,49 @@ on:
   pull_request:
 
 jobs:
-  test:
+  rust:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://test:test@localhost:5432/test
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # Without whisper/piper: no C++ build needed, the API runs against fakes.
+      # Without whisper/piper: no C++ build needed, the API runs against fakes and a real Postgres.
       - run: cargo fmt --check
       - run: cargo clippy --no-default-features --all-targets -- -D warnings
       - run: cargo test --no-default-features
 
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:deps
+      - run: pnpm typecheck
+      - run: pnpm build
+
   build-pi:
     runs-on: ubuntu-latest
-    needs: test
+    needs: rust
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4

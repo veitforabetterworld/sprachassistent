@@ -1,5 +1,8 @@
-//! HTTP API. Everything except `/v1/health` needs `Authorization: Bearer <API_KEY>`
-//! (or `X-API-Key`).
+//! HTTP API of the voice server.
+//!
+//! Public (nginx forwards them): `GET /v1/health` and `POST /v1/talk` for the ESPs, authenticated with an ESP key
+//! from the admin area (`Authorization: Bearer spa_...` or `X-API-Key`).
+//! Internal (localhost only, used by apps/api for the admin area): `/internal/...`.
 
 use std::sync::Arc;
 
@@ -8,17 +11,21 @@ use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::Semaphore;
+use uuid::Uuid;
 
 use crate::assistant::{Assistant, NOT_UNDERSTOOD};
 use crate::audio;
-use crate::speech::{is_hallucination, SpeechToText, TextToSpeech};
+use crate::llm::ChatMessage;
+use crate::sentences::SentenceSplitter;
+use crate::speech::{is_hallucination, voice_label, SpeechToText, TextToSpeech, VoiceBank};
+use crate::store::Device;
 
 /// 30 s of 16 kHz 16-bit audio is under 1 MB; WAV uploads from a PC may be stereo/44.1 kHz.
 const MAX_UPLOAD: usize = 12 * 1024 * 1024;
@@ -29,32 +36,22 @@ const SILENCE_RMS: f32 = 0.002;
 pub struct AppState {
     pub assistant: Arc<Assistant>,
     pub stt: Option<Arc<dyn SpeechToText>>,
-    pub tts: Option<Arc<dyn TextToSpeech>>,
-    pub api_key: Arc<str>,
+    pub voices: Arc<dyn VoiceBank>,
     /// One recognition at a time; two in parallel would only slow both down on the Pi.
     pub stt_slot: Arc<Semaphore>,
 }
 
 pub fn router(state: AppState) -> Router {
-    let protected = Router::new()
-        .route("/v1/talk", post(talk))
-        .route("/v1/transcribe", post(transcribe))
-        .route("/v1/chat", post(chat))
-        .route("/v1/speak", post(speak))
-        .route("/v1/memory", get(memory).delete(clear_memory))
-        .route("/v1/memory/facts", post(add_fact))
-        .route(
-            "/v1/memory/facts/{id}",
-            delete(delete_fact).put(update_fact),
-        )
-        .route(
-            "/v1/persona",
-            get(get_persona).put(set_persona).delete(reset_persona),
-        )
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_key));
+    let internal = Router::new()
+        .route("/internal/voices", get(voices))
+        .route("/internal/devices/{id}/chat", post(device_chat))
+        .route("/internal/devices/{id}/speak", post(device_speak))
+        .route("/internal/providers/{id}/test", post(provider_test))
+        .route_layer(middleware::from_fn(local_only));
     Router::new()
         .route("/v1/health", get(health))
-        .merge(protected)
+        .route("/v1/talk", post(talk))
+        .merge(internal)
         .layer(DefaultBodyLimit::max(MAX_UPLOAD))
         .with_state(state)
 }
@@ -76,76 +73,71 @@ impl From<anyhow::Error> for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-async fn require_key(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    if state.api_key.is_empty() {
-        return next.run(req).await;
+/// nginx sets X-Forwarded-For on everything it forwards; internal routes are for apps/api on the same host.
+async fn local_only(req: Request, next: Next) -> Response {
+    if req.headers().contains_key("x-forwarded-for") {
+        return StatusCode::NOT_FOUND.into_response();
     }
-    let headers = req.headers();
-    let given = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()))
-        .unwrap_or("");
-    if constant_time_eq(given.as_bytes(), state.api_key.as_bytes()) {
-        next.run(req).await
-    } else {
-        ApiError(
-            StatusCode::UNAUTHORIZED,
-            "API-Schluessel fehlt oder ist falsch".into(),
-        )
-        .into_response()
-    }
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    next.run(req).await
 }
 
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let store = &state.assistant.store;
     Json(json!({
         "status": "ok",
+        "db": store.ping().await,
         "stt": state.stt.is_some(),
-        "tts": state.tts.is_some(),
-        "providers": state.assistant.llm.names(),
+        "voices": state.voices.list(),
+        "providers": store.provider_names().await.unwrap_or_default(),
     }))
 }
 
+async fn voices(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let voices: Vec<_> = state
+        .voices
+        .list()
+        .into_iter()
+        .map(|id| json!({ "id": id, "label": voice_label(&id) }))
+        .collect();
+    Json(json!({ "voices": voices }))
+}
+
 #[derive(Deserialize, Default)]
-struct AudioQuery {
+struct TalkQuery {
+    /// Needed when the key covers several devices.
+    device: Option<Uuid>,
     /// `pcm` (default, raw s16le mono for the ESP32) or `wav`
     format: Option<String>,
     /// Sample rate of a raw PCM upload, default 16000
     rate: Option<u32>,
 }
 
-impl AudioQuery {
-    fn wav(&self) -> bool {
-        self.format.as_deref() == Some("wav")
-    }
+fn device_key(headers: &HeaderMap) -> &str {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()))
+        .unwrap_or("")
 }
 
-fn stt(state: &AppState) -> ApiResult<Arc<dyn SpeechToText>> {
-    state.stt.clone().ok_or_else(|| {
+async fn voice_of(state: &AppState, device: &Device) -> ApiResult<Arc<dyn TextToSpeech>> {
+    let voices = Arc::clone(&state.voices);
+    let id = device.voice.clone();
+    tokio::task::spawn_blocking(move || voices.voice(&id))
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?
+        .map_err(|e| ApiError(StatusCode::SERVICE_UNAVAILABLE, format!("{e:#}")))
+}
+
+async fn recognize(state: &AppState, body: &[u8], rate: u32) -> ApiResult<String> {
+    let stt = state.stt.clone().ok_or_else(|| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "Spracherkennung nicht verfuegbar".into(),
         )
-    })
-}
-
-fn tts(state: &AppState) -> ApiResult<Arc<dyn TextToSpeech>> {
-    state.tts.clone().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Sprachausgabe nicht verfuegbar".into(),
-        )
-    })
-}
-
-async fn recognize(state: &AppState, body: &[u8], q: &AudioQuery) -> ApiResult<String> {
-    let stt = stt(state)?;
-    let samples = audio::decode_upload(body, q.rate.unwrap_or(audio::STT_RATE))
+    })?;
+    let samples = audio::decode_upload(body, rate)
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
     let seconds = samples.len() as f32 / audio::STT_RATE as f32;
     if seconds < 0.3 || audio::rms(&samples) < SILENCE_RMS {
@@ -172,9 +164,10 @@ async fn recognize(state: &AppState, body: &[u8], q: &AudioQuery) -> ApiResult<S
     })
 }
 
-/// Speaks each sentence as soon as it is synthesized. Raw PCM by default, WAV with `format=wav`.
+/// Speaks each sentence as soon as it is synthesized. Raw PCM by default, WAV with `wav`.
 fn audio_response(
     tts: Arc<dyn TextToSpeech>,
+    speed: f32,
     sentences: impl futures_util::Stream<Item = String> + Send + 'static,
     wav: bool,
     transcript: Option<&str>,
@@ -187,7 +180,7 @@ fn audio_response(
         let mut sentences = Box::pin(sentences);
         while let Some(sentence) = sentences.next().await {
             let tts = Arc::clone(&tts);
-            match tokio::task::spawn_blocking(move || tts.synthesize(&sentence)).await {
+            match tokio::task::spawn_blocking(move || tts.synthesize(&sentence, speed)).await {
                 Ok(Ok(samples)) => yield Ok(Bytes::from(audio::f32_to_s16le(&samples))),
                 Ok(Err(e)) => tracing::error!("Sprachausgabe: {e:#}"),
                 Err(e) => tracing::error!("Sprachausgabe: {e}"),
@@ -217,26 +210,26 @@ fn audio_response(
 /// Audio in, spoken answer out: the endpoint the ESP32 uses.
 async fn talk(
     State(state): State<AppState>,
-    Query(q): Query<AudioQuery>,
+    Query(q): Query<TalkQuery>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Response> {
-    let tts = tts(&state)?;
-    let text = recognize(&state, &body, &q).await?;
+    let device = state
+        .assistant
+        .store
+        .authenticate_device(device_key(&headers), q.device)
+        .await
+        .map_err(|e| ApiError(StatusCode::UNAUTHORIZED, format!("{e:#}")))?;
+    let tts = voice_of(&state, &device).await?;
+    let wav = q.format.as_deref() == Some("wav");
+    let text = recognize(&state, &body, q.rate.unwrap_or(audio::STT_RATE)).await?;
     if text.is_empty() {
         let sentences = futures_util::stream::iter([NOT_UNDERSTOOD.to_string()]);
-        return Ok(audio_response(tts, sentences, q.wav(), Some("")));
+        return Ok(audio_response(tts, device.speed, sentences, wav, Some("")));
     }
-    let sentences = Arc::clone(&state.assistant).reply_stream(text.clone());
-    Ok(audio_response(tts, sentences, q.wav(), Some(&text)))
-}
-
-async fn transcribe(
-    State(state): State<AppState>,
-    Query(q): Query<AudioQuery>,
-    body: Bytes,
-) -> ApiResult<Json<serde_json::Value>> {
-    let text = recognize(&state, &body, &q).await?;
-    Ok(Json(json!({ "text": text })))
+    let speed = device.speed;
+    let sentences = Arc::clone(&state.assistant).reply_stream(device, text.clone());
+    Ok(audio_response(tts, speed, sentences, wav, Some(&text)))
 }
 
 #[derive(Deserialize)]
@@ -244,136 +237,75 @@ struct TextBody {
     text: String,
 }
 
-async fn chat(
-    State(state): State<AppState>,
-    Json(body): Json<TextBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    if body.text.trim().is_empty() {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "text ist leer".into()));
-    }
-    let reply = Arc::clone(&state.assistant)
-        .reply(body.text.trim().to_string())
-        .await;
-    Ok(Json(json!({ "reply": reply })))
+async fn device_or_404(state: &AppState, id: Uuid) -> ApiResult<Device> {
+    state
+        .assistant
+        .store
+        .device(id)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Geraet nicht gefunden".into()))
 }
 
-async fn speak(
+/// Text chat with a device's personality and memory (admin area).
+async fn device_chat(
     State(state): State<AppState>,
-    Query(q): Query<AudioQuery>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<TextBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let device = device_or_404(&state, id).await?;
+    let started = std::time::Instant::now();
+    let reply = Arc::clone(&state.assistant)
+        .reply(device, body.text.trim().to_string())
+        .await;
+    Ok(Json(
+        json!({ "reply": reply, "ms": started.elapsed().as_millis() as u64 }),
+    ))
+}
+
+/// Text in the device's voice as WAV (admin area).
+async fn device_speak(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
     Json(body): Json<TextBody>,
 ) -> ApiResult<Response> {
-    let tts = tts(&state)?;
-    let mut splitter = crate::sentences::SentenceSplitter::default();
+    let device = device_or_404(&state, id).await?;
+    let tts = voice_of(&state, &device).await?;
+    let mut splitter = SentenceSplitter::default();
     let mut sentences = splitter.push(&body.text);
     sentences.extend(splitter.finish());
     Ok(audio_response(
         tts,
+        device.speed,
         futures_util::stream::iter(sentences),
-        q.wav(),
+        true,
         None,
     ))
 }
 
-#[derive(Deserialize)]
-struct MemoryQuery {
-    messages: Option<usize>,
-}
-
-async fn memory(
+/// One short request to a provider, to check key and model (admin area).
+async fn provider_test(
     State(state): State<AppState>,
-    Query(q): Query<MemoryQuery>,
+    Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let m = &state.assistant.memory;
-    Ok(Json(json!({
-        "facts": m.facts()?,
-        "messages": m.recent_messages(q.messages.unwrap_or(50))?,
-    })))
-}
-
-#[derive(Deserialize)]
-struct ClearQuery {
-    /// `facts`, `messages` or `all` (default)
-    what: Option<String>,
-}
-
-async fn clear_memory(
-    State(state): State<AppState>,
-    Query(q): Query<ClearQuery>,
-) -> ApiResult<StatusCode> {
-    let m = &state.assistant.memory;
-    match q.what.as_deref().unwrap_or("all") {
-        "facts" => m.clear_facts()?,
-        "messages" => m.clear_messages()?,
-        "all" => {
-            m.clear_facts()?;
-            m.clear_messages()?;
-        }
-        other => return Err(ApiError(StatusCode::BAD_REQUEST, format!("what={other}?"))),
-    }
-    Ok(StatusCode::NO_CONTENT)
-}
-
-#[derive(Deserialize)]
-struct FactBody {
-    content: String,
-}
-
-async fn add_fact(
-    State(state): State<AppState>,
-    Json(body): Json<FactBody>,
-) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
-    if body.content.trim().is_empty() {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "content ist leer".into()));
-    }
-    let id = state.assistant.memory.add_fact(&body.content)?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
-}
-
-async fn update_fact(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-    Json(body): Json<FactBody>,
-) -> ApiResult<StatusCode> {
-    if state.assistant.memory.update_fact(id, &body.content)? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError(
-            StatusCode::NOT_FOUND,
-            format!("Fakt {id} gibt es nicht"),
-        ))
-    }
-}
-
-async fn delete_fact(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<StatusCode> {
-    if state.assistant.memory.delete_fact(id)? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError(
-            StatusCode::NOT_FOUND,
-            format!("Fakt {id} gibt es nicht"),
-        ))
-    }
-}
-
-async fn get_persona(State(state): State<AppState>) -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        state.assistant.persona.get(),
-    )
-}
-
-async fn set_persona(State(state): State<AppState>, body: String) -> ApiResult<StatusCode> {
-    if body.trim().is_empty() {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "Persoenlichkeit ist leer".into(),
-        ));
-    }
-    state.assistant.persona.set(&body)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn reset_persona(State(state): State<AppState>) -> ApiResult<StatusCode> {
-    state.assistant.persona.reset()?;
-    Ok(StatusCode::NO_CONTENT)
+    let provider = state
+        .assistant
+        .store
+        .provider(id)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Anbieter nicht gefunden".into()))?;
+    let messages = [ChatMessage::new(
+        "user",
+        "Antworte nur mit dem Wort: funktioniert",
+    )];
+    let started = std::time::Instant::now();
+    let result = state
+        .assistant
+        .llm
+        .complete(&[provider], &messages, false)
+        .await;
+    let ms = started.elapsed().as_millis() as u64;
+    Ok(Json(match result {
+        Ok(reply) => json!({ "ok": true, "reply": reply.trim(), "ms": ms }),
+        Err(e) => json!({ "ok": false, "error": format!("{e:#}"), "ms": ms }),
+    }))
 }

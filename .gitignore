@@ -10,3 +10,8 @@
 # Firmware
 firmware/.pio/
 firmware/include/secrets.h
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo

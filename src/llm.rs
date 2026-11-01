@@ -1,4 +1,4 @@
-//! OpenAI-compatible chat completions (Groq, Gemini, Ollama) with fallback to the next provider.
+//! OpenAI-compatible chat completions (Groq, Gemini, Ollama, ...) with fallback to the next provider.
 
 use std::time::Duration;
 
@@ -26,13 +26,19 @@ impl ChatMessage {
 
 pub type TokenStream = BoxStream<'static, Result<String>>;
 
+/// Providers come with every call: each device has its own order (its provider first, then the others).
 #[async_trait]
 pub trait ChatModel: Send + Sync {
     /// Streams the reply token by token.
-    async fn stream(&self, messages: &[ChatMessage]) -> Result<TokenStream>;
+    async fn stream(&self, providers: &[Provider], messages: &[ChatMessage])
+        -> Result<TokenStream>;
     /// Whole reply at once; `json` asks for a JSON object.
-    async fn complete(&self, messages: &[ChatMessage], json: bool) -> Result<String>;
-    fn names(&self) -> Vec<String>;
+    async fn complete(
+        &self,
+        providers: &[Provider],
+        messages: &[ChatMessage],
+        json: bool,
+    ) -> Result<String>;
 }
 
 #[derive(Debug, Clone)]
@@ -56,15 +62,14 @@ impl Provider {
 
 pub struct Llm {
     client: reqwest::Client,
-    providers: Vec<Provider>,
 }
 
 impl Llm {
-    pub fn new(providers: Vec<Provider>) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .build()?;
-        Ok(Self { client, providers })
+        Ok(Self { client })
     }
 
     async fn post(
@@ -108,12 +113,24 @@ impl Llm {
     }
 }
 
+fn no_provider(errors: Vec<String>) -> anyhow::Error {
+    if errors.is_empty() {
+        anyhow!("kein KI-Anbieter eingerichtet (Adminbereich: KI-Anbieter, API-Key eintragen)")
+    } else {
+        anyhow!("kein KI-Anbieter erreichbar ({})", errors.join("; "))
+    }
+}
+
 #[async_trait]
 impl ChatModel for Llm {
-    async fn stream(&self, messages: &[ChatMessage]) -> Result<TokenStream> {
+    async fn stream(
+        &self,
+        providers: &[Provider],
+        messages: &[ChatMessage],
+    ) -> Result<TokenStream> {
         // Fallback only covers failures before the reply starts; a stream that breaks midway ends.
         let mut errors = Vec::new();
-        for p in &self.providers {
+        for p in providers {
             let body = Self::body(p, messages, true, false);
             match self.post(p, &body, Duration::from_secs(60)).await {
                 Ok(resp) => {
@@ -126,15 +143,17 @@ impl ChatModel for Llm {
                 }
             }
         }
-        Err(anyhow!(
-            "kein KI-Anbieter erreichbar ({})",
-            errors.join("; ")
-        ))
+        Err(no_provider(errors))
     }
 
-    async fn complete(&self, messages: &[ChatMessage], json_mode: bool) -> Result<String> {
+    async fn complete(
+        &self,
+        providers: &[Provider],
+        messages: &[ChatMessage],
+        json_mode: bool,
+    ) -> Result<String> {
         let mut errors = Vec::new();
-        for p in &self.providers {
+        for p in providers {
             let body = Self::body(p, messages, false, json_mode);
             let result = async {
                 let v: Value = self
@@ -156,14 +175,7 @@ impl ChatModel for Llm {
                 }
             }
         }
-        Err(anyhow!(
-            "kein KI-Anbieter erreichbar ({})",
-            errors.join("; ")
-        ))
-    }
-
-    fn names(&self) -> Vec<String> {
-        self.providers.iter().map(|p| p.name.clone()).collect()
+        Err(no_provider(errors))
     }
 }
 

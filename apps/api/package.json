@@ -1,0 +1,29 @@
+{
+  "name": "@sprachassistent/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@veit/api-keys": "workspace:*",
+    "@veit/auth-server": "workspace:*",
+    "@veit/db": "workspace:*",
+    "express": "^4.21.2",
+    "helmet": "^8.1.0",
+    "nodemailer": "^10.3.1",
+    "pg": "^8.13.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

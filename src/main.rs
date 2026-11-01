@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -5,11 +6,11 @@ use tokio::sync::Semaphore;
 use tracing_subscriber::EnvFilter;
 
 use sprachassistent::api::{self, AppState};
-use sprachassistent::assistant::{Assistant, PersonaStore};
+use sprachassistent::assistant::Assistant;
 use sprachassistent::config::Config;
 use sprachassistent::llm::Llm;
-use sprachassistent::memory::MemoryStore;
-use sprachassistent::speech::{SpeechToText, TextToSpeech};
+use sprachassistent::speech::{SpeechToText, VoiceBank};
+use sprachassistent::store::Store;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,33 +20,28 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::from_env()?;
-    if config.api_key.is_empty() {
-        tracing::warn!("API_KEY ist leer, die API ist ohne Schluessel erreichbar");
-    }
-    if config.providers.is_empty() {
-        tracing::warn!("kein KI-Anbieter konfiguriert (LLM_PROVIDERS und API-Schluessel pruefen)");
-    }
+    let store = Store::connect(&config.database_url)
+        .await
+        .context("Datenbank nicht erreichbar (DATABASE_URL)")?;
+    store.migrate().await?;
+    // Speech settings are read once; the admin area says that they need a restart.
+    let settings = store.settings().await?;
 
-    let memory = Arc::new(MemoryStore::open(&config.data_dir.join("memory.sqlite"))?);
-    let assistant = Arc::new(Assistant {
-        llm: Arc::new(Llm::new(config.providers.clone())?),
-        memory,
-        persona: PersonaStore::new(config.data_dir.join("persona.md")),
-        history_messages: config.history_messages,
-        memory_extraction: config.memory_extraction,
-    });
-
-    let (stt, tts) = tokio::task::spawn_blocking({
-        let config = config.clone();
-        move || (load_stt(&config), load_tts(&config))
+    let stt = tokio::task::spawn_blocking({
+        let (config, settings) = (config.clone(), settings.clone());
+        move || load_stt(&config, &settings)
     })
     .await?;
+    let voices = load_voices(&config, &settings);
+    tracing::info!("Stimmen: {:?}", voices.list());
 
     let state = AppState {
-        assistant,
+        assistant: Arc::new(Assistant {
+            llm: Arc::new(Llm::new()?),
+            store,
+        }),
         stt,
-        tts,
-        api_key: config.api_key.clone().into(),
+        voices,
         stt_slot: Arc::new(Semaphore::new(1)),
     };
     let addr = format!("{}:{}", config.host, config.port);
@@ -61,18 +57,36 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// A missing model disables the endpoint instead of stopping the server, so chat and memory
-/// keep working and `/v1/health` shows what is missing.
+#[cfg_attr(not(any(feature = "whisper", feature = "piper")), allow(dead_code))]
+fn setting<T: std::str::FromStr>(settings: &HashMap<String, String>, key: &str, default: T) -> T {
+    settings
+        .get(key)
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+/// A missing model disables recognition instead of stopping the server; `/v1/health` shows it.
 #[allow(unused_variables)]
-fn load_stt(config: &Config) -> Option<Arc<dyn SpeechToText>> {
+fn load_stt(config: &Config, settings: &HashMap<String, String>) -> Option<Arc<dyn SpeechToText>> {
     #[cfg(feature = "whisper")]
     {
         let started = std::time::Instant::now();
+        let model: String = setting(settings, "whisper_model", String::new());
+        let model = if std::path::Path::new(&model).is_absolute() {
+            model.into()
+        } else {
+            // Relative paths in the settings are relative to the models directory's parent (the repo).
+            config
+                .models_dir
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join(model)
+        };
         match sprachassistent::speech::WhisperStt::load(
-            &config.whisper_model,
-            config.whisper_threads,
-            config.whisper_beam_size,
-            &config.whisper_language,
+            &model,
+            setting(settings, "whisper_threads", 4),
+            setting(settings, "whisper_beam_size", 1),
+            &setting(settings, "whisper_language", "de".to_string()),
         ) {
             Ok(stt) => {
                 tracing::info!(
@@ -90,23 +104,29 @@ fn load_stt(config: &Config) -> Option<Arc<dyn SpeechToText>> {
 }
 
 #[allow(unused_variables)]
-fn load_tts(config: &Config) -> Option<Arc<dyn TextToSpeech>> {
+fn load_voices(config: &Config, settings: &HashMap<String, String>) -> Arc<dyn VoiceBank> {
     #[cfg(feature = "piper")]
-    {
-        let started = std::time::Instant::now();
-        match sprachassistent::speech::PiperTts::load(
-            &config.piper_model,
-            config.piper_threads,
-            config.piper_speed,
-        ) {
-            Ok(tts) => {
-                tracing::info!("Piper geladen in {:.1} s", started.elapsed().as_secs_f32());
-                return Some(Arc::new(tts));
-            }
-            Err(e) => tracing::error!("{e:#}"),
-        }
-    }
+    return Arc::new(sprachassistent::speech::PiperVoices::new(
+        config.models_dir.clone(),
+        setting(settings, "tts_threads", 2),
+    ));
     #[cfg(not(feature = "piper"))]
-    tracing::warn!("ohne Feature piper gebaut, keine Sprachausgabe");
-    None
+    {
+        tracing::warn!("ohne Feature piper gebaut, keine Sprachausgabe");
+        Arc::new(NoVoices)
+    }
+}
+
+#[cfg(not(feature = "piper"))]
+struct NoVoices;
+
+#[cfg(not(feature = "piper"))]
+impl VoiceBank for NoVoices {
+    fn list(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn voice(&self, id: &str) -> Result<Arc<dyn sprachassistent::speech::TextToSpeech>> {
+        anyhow::bail!("ohne Feature piper gebaut, Stimme {id} gibt es nicht")
+    }
 }

@@ -1,84 +1,85 @@
 # Sprachassistent
 
-Sprachassistent mit Persönlichkeit und Gedächtnis. Ein ESP32 dient als Mikrofon und Lautsprecher, die Arbeit macht ein Rust-Server auf dem Raspberry Pi 5:
+Sprachassistent mit Persönlichkeit und Gedächtnis. ESP32 dienen als Mikrofon und Lautsprecher, die Arbeit macht der Raspberry Pi 5. Jeder ESP ist ein eigenes Gerät mit eigener Stimme, Persönlichkeit und eigenem Gedächtnis; alles wird im Adminbereich unter https://sprachassistent.plenivo.de eingestellt.
 
 ```
 ESP32 (INMP441, MAX98357A, Taster)
-  │  POST /v1/talk  (16 kHz PCM, chunked)
+  │  POST /v1/talk  (16 kHz PCM, chunked, ESP-Schlüssel)
   ▼
-sprachassistent.plenivo.de ─ nginx ─ 127.0.0.1:3020  Rust-Server (axum)
-  ├─ Spracherkennung  whisper.cpp (whisper-rs)       lokal
-  ├─ Gedächtnis       SQLite: Verlauf + Fakten        lokal
-  ├─ Persönlichkeit   data/persona.md (API)           lokal
-  ├─ KI               Groq → Gemini (Fallback)        extern, nur Text
-  └─ Sprachausgabe    Piper-Stimme (sherpa-rs)        lokal
-  ▼  Antwort als PCM, Satz für Satz gestreamt
-ESP32 spielt ab
+sprachassistent.plenivo.de ─ nginx
+  ├─ /v1/talk, /v1/health ─ 127.0.0.1:3020  Rust-Sprachserver (axum)
+  │     ├─ Spracherkennung  whisper.cpp (whisper-rs)              lokal
+  │     ├─ KI               Anbieter aus der DB, mit Fallback      extern, nur Text
+  │     └─ Sprachausgabe    Piper-Stimmen (sherpa-rs), je Gerät     lokal
+  ├─ /v1/*            ─ 127.0.0.1:3022  Web-API (Node, veit-framework)
+  │     Konten, ESP-Schlüssel, Geräte, KI-Anbieter, Gedächtnis, Einstellungen
+  └─ /                ─ Adminbereich (React, veit-framework)
+Postgres: Einstellungen, Anbieter, Geräte, Gedächtnis je Gerät, Konten und Schlüssel
 ```
 
-Nur Text verlässt das Heimnetz. Laufende Kosten: Strom für den Pi und die Gratis-Kontingente von Groq und Gemini.
+Nur Text verlässt das Heimnetz. Laufende Kosten: Strom für den Pi und die Gratis-Kontingente von Groq oder Gemini.
 
 ## Struktur
 
 ```
-src/                 Rust-Server
-  api.rs             HTTP-Endpunkte
-  assistant.rs       Prompt, Persönlichkeit, Fakten-Extraktion
-  speech.rs          Whisper (Feature whisper) und Piper (Feature piper)
+src/                 Rust-Sprachserver
+  api.rs             /v1/talk, /v1/health und interne Routen für den Adminbereich
+  store.rs           Postgres: Geräte, Gedächtnis, Anbieter, ESP-Schlüssel prüfen
+  assistant.rs       Prompt, Persönlichkeit, Fakten-Extraktion je Gerät
+  speech.rs          Whisper (Feature whisper) und Piper-Stimmen (Feature piper)
   llm.rs             OpenAI-kompatible Anbieter mit Fallback, Streaming
-  memory.rs          SQLite
   sentences.rs       Antwort-Stream in Sätze zerlegen
-persona.md           Standard-Persönlichkeit (eingebaut)
+db/schema.sql        Tabellen und Standardwerte (Rust und Web-API wenden es an)
+apps/api/            Web-API: @veit/auth-server, @veit/api-keys, Admin-Routen
+apps/web/            Adminbereich: @veit/react-auth, -account, -api-keys, -controls
+veit-framework/      Submodule (Pin origin/development)
 firmware/            ESP32 (PlatformIO, Arduino)
 deployments/build/   Cross-Compile für den Pi (Docker, Debian bookworm → aarch64)
 deployments/pi/      Bootstrap, Runtime-Reload, nginx, pm2, Modell-Download
 ```
 
-## API
+## Konfiguration
 
-Alles außer `/v1/health` braucht `Authorization: Bearer <API_KEY>`.
+In `.env` steht nur `DATABASE_URL` (Vorlage `.env.example`). Alles andere liegt in der Datenbank und wird im Adminbereich gepflegt:
+
+| Tab | Inhalt |
+|---|---|
+| Geräte | Name, Stimme, Sprechtempo, Persönlichkeit, bevorzugter KI-Anbieter, Verlaufslänge, automatisches Gedächtnis; Testchat und Vorlesen; Fakten und Verlauf ansehen, ergänzen, löschen |
+| ESP-Schlüssel | API-Keys von `@veit/api-keys` mit der Berechtigung `device.talk`, beschränkt auf Geräte |
+| KI-Anbieter | OpenAI-kompatible Endpunkte (Groq, Gemini, OpenRouter, Ollama …) mit Key, Modell, Reihenfolge; Test-Button |
+| Einstellungen | Registrierung, SMTP, Whisper-Modell und Threads |
+
+Das erste Konto, das sich registriert, wird Admin; danach ist die Registrierung geschlossen.
+
+## API für die ESPs
 
 | Methode | Pfad | |
 |---|---|---|
-| GET | `/v1/health` | Status, ob Erkennung und Ausgabe geladen sind, Anbieter |
-| POST | `/v1/talk` | Audio rein (rohes s16le 16 kHz oder WAV), gesprochene Antwort raus. `?format=wav` für WAV statt PCM. Header `X-Sample-Rate`, `X-Transcript` |
-| POST | `/v1/transcribe` | Audio → `{"text"}` |
-| POST | `/v1/chat` | `{"text"}` → `{"reply"}`, ohne Audio, mit Gedächtnis |
-| POST | `/v1/speak` | `{"text"}` → Audio |
-| GET | `/v1/memory` | Fakten und letzte Nachrichten (`?messages=50`) |
-| DELETE | `/v1/memory` | `?what=facts\|messages\|all` |
-| POST | `/v1/memory/facts` | `{"content"}` |
-| PUT, DELETE | `/v1/memory/facts/{id}` | |
-| GET, PUT, DELETE | `/v1/persona` | Persönlichkeit als Text; DELETE setzt `persona.md` zurück |
-
-Beispiele:
+| GET | `/v1/health` | Datenbank, Spracherkennung, installierte Stimmen, Anbieter mit Key |
+| POST | `/v1/talk` | Audio rein (rohes s16le 16 kHz oder WAV), gesprochene Antwort raus. `Authorization: Bearer spa_…`. `?format=wav` für WAV, `?device=<id>` wenn der Schlüssel mehrere Geräte abdeckt. Header `X-Sample-Rate`, `X-Transcript` |
 
 ```bash
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"text":"Hallo, ich heiße Veit"}' https://sprachassistent.plenivo.de/v1/chat
-curl -H "Authorization: Bearer $KEY" --data-binary @frage.wav \
-  "https://sprachassistent.plenivo.de/v1/talk?format=wav" -o antwort.wav
-curl -X PUT -H "Authorization: Bearer $KEY" --data-binary @meine-persona.md \
-  https://sprachassistent.plenivo.de/v1/persona
+curl -H "Authorization: Bearer $ESP_KEY" --data-binary @frage.wav   "https://sprachassistent.plenivo.de/v1/talk?format=wav" -o antwort.wav
 ```
-
-Nach jedem Gespräch fragt der Server das Modell, ob sich Fakten über den Nutzer geändert haben (`MEMORY_EXTRACTION`). Diese Fakten und die letzten `HISTORY_MESSAGES` Nachrichten gehen in jeden Prompt.
 
 ## Lokal
 
-Tests ohne Sprachmodelle (keine C++-Abhängigkeiten):
-
 ```bash
-cargo test --no-default-features
+git submodule update --init --recursive
+pnpm install && pnpm build:deps
+docker run -d --name sa-pg -e POSTGRES_PASSWORD=sprachassistent -e POSTGRES_USER=sprachassistent -p 5432:5432 postgres:17
+cp .env.example .env
+pnpm dev:api        # Web-API :3022
+pnpm dev:web        # Adminbereich :5173 (Proxy auf :3020 und :3022)
+cargo run           # Sprachserver :3020 (Linux; ohne Modelle: --no-default-features)
 ```
 
-Ohne lokale Rust-Installation geht das auch über Docker:
+Tests (Postgres nötig, ohne `TEST_DATABASE_URL` werden die API-Tests übersprungen):
 
 ```bash
-docker run --rm -v "$PWD:/src" -w /src rust:1-bookworm cargo test --no-default-features
+TEST_DATABASE_URL=postgres://… cargo test --no-default-features
+pnpm typecheck
 ```
-
-Server mit Modellen: `.env.example` nach `.env` kopieren, `bash deployments/pi/download-models.sh`, dann `cargo run --release` (unter Linux; braucht cmake und clang für whisper.cpp).
 
 ## Build für den Pi
 
@@ -87,19 +88,17 @@ docker build -t sprachassistent-build deployments/build
 docker run --rm -v "$PWD:/src" sprachassistent-build    # → bin/sprachassistent, bin/lib/*.so (aarch64)
 ```
 
-Der Build kompiliert unter Debian bookworm mit dem aarch64-Cross-Compiler. Die Binärdatei braucht deshalb höchstens die glibc von bookworm. whisper.cpp wird aus dem Quellcode gebaut. sherpa-onnx gibt es für aarch64 nur als vorgebaute Shared Library; sie liegt mit onnxruntime in `bin/lib/`, und die Binärdatei findet sie über `rpath $ORIGIN/lib`.
+Der Build kompiliert unter Debian bookworm mit dem aarch64-Cross-Compiler für den Cortex-A76 des Pi 5 (läuft nicht auf einem Pi 4). whisper.cpp wird aus dem Quellcode gebaut. sherpa-onnx gibt es für aarch64 nur als vorgebaute Shared Library; sie liegt mit onnxruntime in `bin/lib/`, die Binärdatei findet sie über `rpath $ORIGIN/lib`.
 
 ## Betrieb auf dem Pi
 
-Einmalig als root (legt `.env` mit `API_KEY` an, lädt die Modelle, setzt den deSEC-CNAME `sprachassistent.plenivo.de → dev.plenivo.de`, holt das Zertifikat und richtet nginx ein):
+Einmalig als root (legt Postgres-Rolle und -Datenbank und `.env` an, lädt Whisper und die Stimmen, setzt den deSEC-CNAME `sprachassistent.plenivo.de → dev.plenivo.de`, holt das Zertifikat und richtet nginx ein):
 
 ```bash
 DEPLOY_PUBKEY="ssh-ed25519 AAAA... github-actions-sprachassistent" bash deployments/pi/bootstrap.sh
 ```
 
-Danach in `/root/sprachassistent/.env` `GROQ_API_KEY` und `GEMINI_API_KEY` eintragen (kostenlos bei console.groq.com und aistudio.google.com).
-
-Im GitHub-Environment `production` müssen `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY` und `DEPLOY_PATH` gesetzt sein. Ein Push auf `deploy` baut die Binärdatei und kopiert sie mit den Deploy-Skripten auf den Pi. `runtime-reload.sh` startet dann pm2 (`sprachassistent-api`) neu.
+Im GitHub-Environment `production` müssen `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY` und `DEPLOY_PATH` gesetzt sein. Ein Push auf `deploy` baut Sprachserver, Web-API und Adminbereich und kopiert alles auf den Pi; `runtime-reload.sh` installiert die Node-Abhängigkeiten, kopiert die Weboberfläche nach `/var/www/sprachassistent/app` und startet pm2 neu (`sprachassistent-voice`, `sprachassistent-web`).
 
 ## Branches
 
@@ -108,7 +107,13 @@ Im GitHub-Environment `production` müssen `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_
 
 ## ESP32
 
-Verkabelung (ESP32-WROOM-32E):
+### Anschlussplan
+
+![Anschlussplan: ESP32-WROOM-32E mit INMP441, MAX98357A, Taster und Lautsprecher](docs/anschlussplan.svg)
+
+Benötigt: ESP32-DevKit (WROOM-32E), INMP441, MAX98357A, Lautsprecher (4–8 Ω, 2–3 W), Taster. Alle GND-Pins hängen zusammen, deshalb ist egal, welchen GND des ESP32 du nimmst. Die Pin-Reihenfolge auf deinen Platinen kann vom Plan abweichen: Löte immer nach der aufgedruckten Beschriftung.
+
+Dieselbe Verkabelung als Tabelle:
 
 | INMP441 | ESP32 | | MAX98357A | ESP32 |
 |---|---|---|---|---|
@@ -121,7 +126,7 @@ Verkabelung (ESP32-WROOM-32E):
 
 Taster zwischen GPIO 13 und GND. Die Onboard-LED (GPIO 2) leuchtet während der Aufnahme. Blinkt sie dreimal, kam keine Antwort; fünfmal heißt, es gab keine Verbindung.
 
-`firmware/include/secrets.example.h` nach `secrets.h` kopieren (WLAN, `API_KEY`, optional das Let's-Encrypt-Root-Zertifikat), dann:
+`firmware/include/secrets.example.h` nach `secrets.h` kopieren (WLAN, als `API_KEY` den ESP-Schlüssel aus dem Adminbereich, optional das Let's-Encrypt-Root-Zertifikat), dann:
 
 ```bash
 cd firmware && pio run -t upload && pio device monitor

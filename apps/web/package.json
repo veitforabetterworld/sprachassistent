@@ -1,0 +1,32 @@
+{
+  "name": "@sprachassistent/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.1.16",
+    "@veit/react-account": "workspace:*",
+    "@veit/react-api-keys": "workspace:*",
+    "@veit/react-auth": "workspace:*",
+    "@veit/react-controls": "workspace:*",
+    "@veit/react-dialog": "workspace:*",
+    "lucide-react": "^0.454.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.1.1",
+    "tailwindcss": "^4.1.16"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.6"
+  }
+}

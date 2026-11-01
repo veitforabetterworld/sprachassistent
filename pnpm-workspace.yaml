@@ -1,0 +1,3 @@
+packages:
+  - "apps/*"
+  - "veit-framework/packages/*"
