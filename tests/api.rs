@@ -496,8 +496,8 @@ async fn tool_setup(effect: Effect) -> Option<(Setup, Arc<ScriptTools>, Uuid, St
     let device = s.device(owner, "Du bist Kurt.").await;
     let name = format!("Tools {device}");
     let (provider,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO llm_providers (user_id, name, base_url, model, priority, supports_tools)
-         VALUES ($1, $2, 'http://127.0.0.1:11434/v1', 'x', 1, true) RETURNING id",
+        "INSERT INTO llm_providers (user_id, name, base_url, model, priority)
+         VALUES ($1, $2, 'http://127.0.0.1:11434/v1', 'x', 1) RETURNING id",
     )
     .bind(owner)
     .bind(&name)
@@ -679,8 +679,8 @@ async fn a_run_stays_on_the_provider_that_answered() {
     };
     let other = format!("Zweiter {device}");
     sqlx::query(
-        "INSERT INTO llm_providers (user_id, name, base_url, model, priority, supports_tools)
-         SELECT user_id, $1, 'http://127.0.0.1:11434/v1', 'y', 2, true FROM devices WHERE id = $2",
+        "INSERT INTO llm_providers (user_id, name, base_url, model, priority)
+         SELECT user_id, $1, 'http://127.0.0.1:11434/v1', 'y', 2 FROM devices WHERE id = $2",
     )
     .bind(&other)
     .bind(device)
@@ -694,7 +694,9 @@ async fn a_run_stays_on_the_provider_that_answered() {
     let seen = s.llm.seen.lock().unwrap();
     let first = &seen[0].0;
     assert!(first.len() >= 2, "{first:?}");
-    assert_eq!(seen[1].0, vec![first[0].clone()]);
+    // The one that answered goes first; the others stay behind it for a limit or an outage.
+    assert_eq!(seen[1].0[0], first[0]);
+    assert_eq!(seen[1].0.len(), first.len());
 }
 
 #[tokio::test]

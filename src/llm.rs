@@ -122,38 +122,16 @@ pub struct Provider {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
-    pub supports_tools: bool,
 }
 
 impl Provider {
-    pub fn new(
-        name: &str,
-        base_url: &str,
-        api_key: String,
-        model: String,
-        supports_tools: bool,
-    ) -> Self {
+    pub fn new(name: &str, base_url: &str, api_key: String, model: String) -> Self {
         Self {
             name: name.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             model,
-            supports_tools,
         }
-    }
-}
-
-/// Providers that may serve this call. Tool turns skip models that cannot call tools.
-/// When none of them can, the caller gets the full list and must drop the tools.
-pub fn providers_for_tools(providers: &[Provider], tools: bool) -> Vec<&Provider> {
-    if !tools {
-        return providers.iter().collect();
-    }
-    let capable: Vec<_> = providers.iter().filter(|p| p.supports_tools).collect();
-    if capable.is_empty() {
-        Vec::new()
-    } else {
-        capable
     }
 }
 
@@ -618,16 +596,7 @@ impl ChatModel for Llm {
         force_tool: bool,
     ) -> Result<ModelTurn> {
         let mut errors = Vec::new();
-        let usable: Vec<&Provider> = if tools.is_empty() {
-            providers.iter().collect()
-        } else {
-            let capable = providers_for_tools(providers, true);
-            if capable.is_empty() {
-                bail!("kein KI-Modell kann Werkzeuge (beim Modell „Werkzeuge“ einschalten)");
-            }
-            capable
-        };
-        for p in usable {
+        for p in providers {
             match self.ask(p, messages, tools, json_mode, force_tool).await {
                 Ok(turn) => return Ok(turn),
                 Err(e) => {
@@ -770,18 +739,6 @@ mod tests {
         assert_eq!(turn.tool_calls[0].name, "echo");
         assert_eq!(turn.input_tokens, 3);
         assert_eq!(turn.provider, "Groq");
-    }
-
-    #[test]
-    fn tool_providers_skip_models_that_cannot_call() {
-        let providers = [
-            Provider::new("a", "http://a", String::new(), "m".into(), false),
-            Provider::new("b", "http://b", String::new(), "m".into(), true),
-        ];
-        let got = providers_for_tools(&providers, true);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].name, "b");
-        assert!(providers_for_tools(&providers[..1], true).is_empty());
     }
 
     #[test]

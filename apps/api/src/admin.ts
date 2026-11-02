@@ -49,7 +49,6 @@ const providerSchema = z.object({
   model: z.string().trim().min(1).max(120),
   enabled: z.boolean().default(true),
   priority: z.coerce.number().int().default(0),
-  supports_tools: z.boolean().default(false),
 });
 
 const deviceSchema = z.object({
@@ -73,7 +72,7 @@ function keyHint(key: string): string {
   return key.length > 8 ? `…${key.slice(-4)}` : "";
 }
 
-function publicProvider(row: { api_key: string; id: string; name: string; base_url: string; model: string; enabled: boolean; priority: number; supports_tools: boolean }) {
+function publicProvider(row: { api_key: string; id: string; name: string; base_url: string; model: string; enabled: boolean; priority: number }) {
   const key = openSecret(row.api_key);
   return {
     id: row.id,
@@ -82,7 +81,6 @@ function publicProvider(row: { api_key: string; id: string; name: string; base_u
     model: row.model,
     enabled: row.enabled,
     priority: row.priority,
-    supports_tools: row.supports_tools,
     api_key_set: row.api_key !== "",
     api_key_hint: keyHint(key),
   };
@@ -175,7 +173,7 @@ export function adminRouter(): Router {
     "/providers",
     handle(async (req, res) => {
       const rows = await pool.query(
-        `SELECT id, name, base_url, model, enabled, priority, supports_tools, api_key
+        `SELECT id, name, base_url, model, enabled, priority, api_key
          FROM llm_providers WHERE user_id = $1 ORDER BY priority, name`,
         [await ownerId(req)],
       );
@@ -187,10 +185,10 @@ export function adminRouter(): Router {
     handle(async (req, res) => {
       const p = parse(providerSchema, req.body);
       const row = await pool.query(
-        `INSERT INTO llm_providers (user_id, name, base_url, api_key, model, enabled, priority, supports_tools)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING id, name, base_url, model, enabled, priority, supports_tools, api_key`,
-        [await ownerId(req), p.name, p.base_url, p.api_key ? seal(p.api_key) : "", p.model, p.enabled, p.priority, p.supports_tools],
+        `INSERT INTO llm_providers (user_id, name, base_url, api_key, model, enabled, priority)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, name, base_url, model, enabled, priority, api_key`,
+        [await ownerId(req), p.name, p.base_url, p.api_key ? seal(p.api_key) : "", p.model, p.enabled, p.priority],
       );
       res.status(201).json(publicProvider(row.rows[0]));
     }),
@@ -203,10 +201,10 @@ export function adminRouter(): Router {
       const row = await pool.query(
         `UPDATE llm_providers SET name = $2, base_url = $3,
            api_key = CASE WHEN $4 = '' THEN api_key ELSE $4 END,
-           model = $5, enabled = $6, priority = $7, supports_tools = $8
-         WHERE id = $1 AND user_id = $9
-         RETURNING id, name, base_url, model, enabled, priority, supports_tools, api_key`,
-        [id, p.name, p.base_url, p.api_key ? seal(p.api_key) : "", p.model, p.enabled, p.priority, p.supports_tools, await ownerId(req)],
+           model = $5, enabled = $6, priority = $7
+         WHERE id = $1 AND user_id = $8
+         RETURNING id, name, base_url, model, enabled, priority, api_key`,
+        [id, p.name, p.base_url, p.api_key ? seal(p.api_key) : "", p.model, p.enabled, p.priority, await ownerId(req)],
       );
       if (!row.rows[0]) throw new HttpError(404, "Modell nicht gefunden");
       res.json(publicProvider(row.rows[0]));

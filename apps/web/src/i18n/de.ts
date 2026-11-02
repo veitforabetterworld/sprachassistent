@@ -154,8 +154,6 @@ export const de = {
   connectionHint: "Testet die gespeicherten Einstellungen; erst speichern, um Änderungen zu testen.",
   test: "Testen",
   testReply: "„{reply}“ in {ms} ms",
-  supportsTools: "Kann Werkzeuge aufrufen",
-  supportsToolsHint: "Nur einschalten, wenn der Test unten ein Werkzeug aufruft. Sonst fallen Anfragen mit Werkzeugen aus.",
   testTools: "Werkzeug testen",
   testToolsReply: "Werkzeug aufgerufen in {ms} ms",
   testToolsText: "Kein Werkzeug, Antwort: „{reply}“",

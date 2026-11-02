@@ -156,8 +156,6 @@ export const en: Record<MessageKey, string> = {
   connectionHint: "Tests the saved settings; save first to test changes.",
   test: "Test",
   testReply: "“{reply}” in {ms} ms",
-  supportsTools: "Can call tools",
-  supportsToolsHint: "Turn this on only when the test below calls a tool. Otherwise requests with tools fail.",
   testTools: "Test tool",
   testToolsReply: "Tool called in {ms} ms",
   testToolsText: "No tool, reply: “{reply}”",

@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::assistant::{self, NO_ANSWER};
 use crate::authz::{approval_word, frame_tool_result, truncate, validate_args, Approval, Effect};
-use crate::llm::{model_tool_names, ChatMessage, ChatModel, Provider, ToolCall, ToolDef};
+use crate::llm::{model_tool_names, ChatMessage, ChatModel, ToolCall, ToolDef};
 use crate::runs::{RunGuard, CANCELLED, COMPLETED, FAILED, WAITING};
 use crate::secrets::Secrets;
 use crate::sentences::SentenceSplitter;
@@ -359,27 +359,14 @@ async fn drive(
     offers: Vec<ToolOffer>,
     save_user: bool,
 ) -> TurnResult {
-    let all_providers = match store.providers_for(&device, &secrets).await {
+    // Every model may call tools; whether a chatbot gets them is the chatbot's own setting.
+    let mut providers = match store.providers_for(&device, &secrets).await {
         Ok(list) => list,
         Err(e) => {
             tracing::error!("{e:#}");
             return fail(&say, &mut guard, NO_ANSWER).await;
         }
     };
-    let mut providers: Vec<Provider> = all_providers
-        .iter()
-        .filter(|provider| provider.supports_tools)
-        .cloned()
-        .collect();
-    if providers.is_empty() {
-        tracing::warn!(
-            "{}: kein Anbieter mit Werkzeugen, Antwort ohne Werkzeuge",
-            device.name
-        );
-        let mut plain = prompt(&store, &device, channel, &[], user_text).await;
-        plain.push(ChatMessage::new("user", user_text.to_string()));
-        return stream_reply(llm, store, secrets, device, say, guard, plain, user_text).await;
-    }
     let aliases = model_tool_names(offers.iter().map(|offer| offer.name.as_str()));
     // `call_tool` runs arbitrary Home Assistant tools and skips the policy on the inner call.
     let defs: Vec<ToolDef> = offers
@@ -458,35 +445,10 @@ async fn drive(
             }
         };
         let force_tool = nudged && phase == PromptPhase::Lookup;
-        let mut turn_result = llm
+        // `complete` moves on to the next model by itself when one is at its limit.
+        let turn_result = llm
             .complete(&providers, sent, offered, false, force_tool)
             .await;
-        if matches!(&turn_result, Err(error) if transient_provider_failure(&error.to_string())) {
-            let tried: Vec<String> = providers
-                .iter()
-                .filter(|provider| offered.is_empty() || provider.supports_tools)
-                .map(|provider| provider.name.clone())
-                .collect();
-            let rest = providers_after_rate_limit(&all_providers, &tried, !offered.is_empty());
-            if !rest.is_empty() {
-                tracing::warn!(
-                    "{}: {} am Limit, nächstes Modell",
-                    device.name,
-                    tried.join(", ")
-                );
-                turn_result = llm.complete(&rest, sent, offered, false, force_tool).await;
-            }
-            if turn_result.is_err() && !offered.is_empty() {
-                let plain = providers_after_rate_limit(&all_providers, &tried, false)
-                    .into_iter()
-                    .filter(|provider| !provider.supports_tools)
-                    .collect::<Vec<_>>();
-                if !plain.is_empty() {
-                    tracing::warn!("{}: nächstes Modell ohne Werkzeuge", device.name);
-                    turn_result = llm.complete(&plain, sent, &[], false, false).await;
-                }
-            }
-        }
         let mut turn = match turn_result {
             Ok(turn) => turn,
             Err(e) => {
@@ -512,14 +474,14 @@ Argumente aus dem vorherigen Werkzeugergebnis übernehmen.",
                 return fail(&say, &mut guard, &reply).await;
             }
         };
-        // Stay on the provider that answered. The transcript is in the messages, so a later
-        // outage can still move to the next provider.
-        if let Some(provider) = all_providers
+        // Stay on the provider that answered. The others stay behind it, so a later outage or
+        // limit still moves to the next one; the transcript is in the messages.
+        if let Some(at) = providers
             .iter()
-            .find(|provider| provider.name == turn.provider)
-            .cloned()
+            .position(|provider| provider.name == turn.provider)
         {
-            providers = vec![provider];
+            let answered = providers.remove(at);
+            providers.insert(0, answered);
         }
         input_tokens += turn.input_tokens;
         output_tokens += turn.output_tokens;
@@ -954,20 +916,6 @@ fn provider_failure_reply(detail: &str) -> String {
     }
 }
 
-/// Active models that have not just hit the limit. A tool turn only keeps models that can
-/// call tools; the caller asks the others afterwards to write the answer without tools.
-fn providers_after_rate_limit(
-    all: &[Provider],
-    tried: &[String],
-    need_tools: bool,
-) -> Vec<Provider> {
-    all.iter()
-        .filter(|provider| !tried.iter().any(|name| name == &provider.name))
-        .filter(|provider| !need_tools || provider.supports_tools)
-        .cloned()
-        .collect()
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PromptPhase {
     Lookup,
@@ -1123,20 +1071,6 @@ mod tests {
         ));
         assert!(transient_provider_failure("HTTP 503"));
         assert!(!transient_provider_failure("tool_use_failed"));
-        let groq = Provider::new("Groq", "http://groq", String::new(), "qwen".into(), true);
-        let gemini = Provider::new(
-            "Gemini",
-            "http://gemini",
-            String::new(),
-            "flash".into(),
-            false,
-        );
-        let all = [groq, gemini];
-        let next = providers_after_rate_limit(&all, &["Groq".into()], true);
-        assert!(next.is_empty());
-        let plain = providers_after_rate_limit(&all, &["Groq".into()], false);
-        assert_eq!(plain.len(), 1);
-        assert_eq!(plain[0].name, "Gemini");
         let reply = provider_failure_reply("Groq: HTTP 429 Too Many Requests");
         assert_eq!(reply, RATE_LIMIT_REPLY);
         assert!(!provider_failure_reply("Groq: HTTP 401").contains("401"));

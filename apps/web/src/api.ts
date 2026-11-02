@@ -47,7 +47,6 @@ export type Provider = {
   model: string;
   enabled: boolean;
   priority: number;
-  supports_tools: boolean;
   api_key_set: boolean;
   api_key_hint: string;
 };

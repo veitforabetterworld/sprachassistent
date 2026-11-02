@@ -77,7 +77,6 @@ struct ProviderRow {
     base_url: String,
     api_key: String,
     model: String,
-    supports_tools: bool,
 }
 
 const DEVICE_COLUMNS: &str =
@@ -134,7 +133,7 @@ impl Store {
             return Ok(Vec::new());
         };
         let rows: Vec<ProviderRow> = sqlx::query_as(
-            "SELECT name, base_url, api_key, model, supports_tools FROM llm_providers
+            "SELECT name, base_url, api_key, model FROM llm_providers
              WHERE user_id = $2
                AND enabled AND (api_key <> '' OR base_url ~ '^https?://(localhost|127\\.0\\.0\\.1)[:/]')
              ORDER BY (id = $1) DESC, priority, name",
@@ -151,7 +150,7 @@ impl Store {
 
     pub async fn provider(&self, id: Uuid, secrets: &Secrets) -> Result<Option<Provider>> {
         let row: Option<ProviderRow> = sqlx::query_as(
-            "SELECT name, base_url, api_key, model, supports_tools FROM llm_providers WHERE id = $1",
+            "SELECT name, base_url, api_key, model FROM llm_providers WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -167,13 +166,7 @@ impl Store {
                 return None;
             }
         };
-        Some(Provider::new(
-            &row.name,
-            &row.base_url,
-            api_key,
-            row.model,
-            row.supports_tools,
-        ))
+        Some(Provider::new(&row.name, &row.base_url, api_key, row.model))
     }
 
     /// The chatbot an API key may talk as. The key's user must own it. A key names one chatbot, so
