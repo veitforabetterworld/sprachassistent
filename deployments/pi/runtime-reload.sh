@@ -17,6 +17,9 @@ grep -q '^DATABASE_URL=' .env 2>/dev/null \
 log "Sprachmodelle"
 bash deployments/pi/download-models.sh
 
+log "Websuche (SearXNG)"
+bash deployments/pi/searxng.sh
+
 log "pnpm install (Web-API)"
 export CI=1
 corepack enable

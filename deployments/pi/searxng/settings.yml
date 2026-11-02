@@ -1,0 +1,19 @@
+# SearXNG for web_research (src/tools.rs, actions news and search). Bound to 127.0.0.1 only;
+# the voice server reads the JSON format. The secret comes from SEARXNG_SECRET in .env (searxng.sh).
+use_default_settings: true
+
+general:
+  instance_name: sprachassistent
+
+search:
+  safe_search: 0
+  default_lang: de
+  formats:
+    - html
+    - json
+
+server:
+  # Only the voice server asks, so there is nothing to rate-limit and no Valkey is needed.
+  limiter: false
+  public_instance: false
+  image_proxy: false

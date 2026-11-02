@@ -23,7 +23,7 @@ log() { echo "[sprachassistent-bootstrap] $*"; }
 log "Pakete"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq rsync curl bzip2 postgresql
+apt-get install -y -qq rsync curl bzip2 postgresql docker.io
 
 mkdir -p "$REPO/data" "$REPO/bin" /var/www/sprachassistent/app
 if [ "$SCRIPT_DIR" != "$REPO/deployments/pi" ]; then
@@ -60,6 +60,9 @@ fi
 
 log "Sprachmodelle"
 bash "$REPO/deployments/pi/download-models.sh"
+
+log "Websuche (SearXNG)"
+bash "$REPO/deployments/pi/searxng.sh"
 
 log "Deploy-Key fuer root"
 mkdir -p /root/.ssh

@@ -38,7 +38,11 @@ async fn main() -> Result<()> {
     tracing::info!("Stimmen: {:?}", voices.list());
 
     let secrets = Secrets::from_env();
-    let tools = Arc::new(LiveTools::new(store.clone(), secrets.clone())?);
+    let tools = Arc::new(LiveTools::new(
+        store.clone(),
+        secrets.clone(),
+        &config.searxng_url,
+    )?);
     let state = AppState {
         assistant: Arc::new(Assistant {
             llm: Arc::new(Llm::new()?),

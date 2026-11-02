@@ -28,6 +28,7 @@ src/                 Rust-Sprachserver
   assistant.rs       Prompt, Persönlichkeit, Fakten-Extraktion je Gerät
   speech.rs          Whisper (Feature whisper) und Piper-Stimmen (Feature piper)
   llm.rs             OpenAI-kompatible Anbieter mit Fallback, Streaming
+  tools.rs           Werkzeuge: Internetrecherche über selbstgehostetes SearXNG, MCP-Werkzeuge
   sentences.rs       Antwort-Stream in Sätze zerlegen
 db/schema.sql        Tabellen und Standardwerte (Rust und Web-API wenden es an)
 apps/api/            Web-API: @veit/auth-server, @veit/api-keys, Admin-Routen
@@ -51,6 +52,8 @@ In `.env` steht nur `DATABASE_URL` (Vorlage `.env.example`). Alles andere liegt 
 
 Das erste Konto, das sich registriert, wird Admin; danach ist die Registrierung geschlossen.
 
+Die Internetrecherche (`web_research`, Aktionen `news` und `search`) fragt nur das selbstgehostete SearXNG unter `SEARXNG_URL` (Standard `http://127.0.0.1:8888`), das JSON-Format muss an sein. Auf dem Pi läuft es als Docker-Container `sprachassistent-searxng` mit `deployments/pi/searxng/settings.yml`; `deployments/pi/searxng.sh` richtet ihn bei Bootstrap und jedem Deploy ein. Ist SearXNG nicht erreichbar, meldet das Werkzeug einen Fehler, es gibt keine andere Suchquelle.
+
 ## API für die ESPs
 
 | Methode | Pfad | |
@@ -71,6 +74,8 @@ docker run -d --name sa-pg -e POSTGRES_PASSWORD=sprachassistent -e POSTGRES_USER
 cp .env.example .env
 pnpm dev:api        # Web-API :3022
 pnpm dev:web        # Adminbereich :5183 (Proxy auf :3020 und :3022)
+docker run -d --name sa-searxng -p 127.0.0.1:8888:8080 -e SEARXNG_SECRET=lokal \
+  -v "$PWD/deployments/pi/searxng/settings.yml:/etc/searxng/settings.yml:ro" searxng/searxng:2026.10.27-b5ed73fcb
 cargo run           # Sprachserver :3020 (Linux; ohne Modelle: --no-default-features)
 ```
 

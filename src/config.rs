@@ -13,6 +13,8 @@ pub struct Config {
     pub port: u16,
     /// Whisper model and Piper voices (`vits-piper-*` directories).
     pub models_dir: PathBuf,
+    /// Self-hosted SearXNG with the JSON format enabled (`deployments/pi/searxng`).
+    pub searxng_url: String,
 }
 
 impl Config {
@@ -28,6 +30,7 @@ impl Config {
                 .parse()
                 .context("API_PORT ist keine Zahl")?,
             models_dir: var("MODELS_DIR", "models").into(),
+            searxng_url: var("SEARXNG_URL", "http://127.0.0.1:8888"),
         })
     }
 }
