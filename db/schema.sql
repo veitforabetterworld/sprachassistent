@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS llm_providers (
   model TEXT NOT NULL,
   enabled BOOLEAN NOT NULL DEFAULT true,
   priority INTEGER NOT NULL DEFAULT 0,
+  -- A first reply without a tool is sent back once: "call a tool if data or an action is needed".
+  nudge_tools BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -101,6 +103,7 @@ ALTER TABLE device_messages ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEF
 ALTER TABLE device_facts ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'extraction';
 -- Every model may call tools now; the chatbot's tools_enabled is the only switch.
 ALTER TABLE llm_providers DROP COLUMN IF EXISTS supports_tools;
+ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS nudge_tools BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS user_id BIGINT;
 CREATE INDEX IF NOT EXISTS devices_user ON devices (user_id);
 CREATE INDEX IF NOT EXISTS llm_providers_user ON llm_providers (user_id);

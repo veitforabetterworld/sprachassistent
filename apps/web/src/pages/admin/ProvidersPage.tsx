@@ -27,6 +27,7 @@ const PRESETS: Record<string, ProviderInput & { keyUrl?: string; nameKey?: Messa
     model: "qwen/qwen3.8-27b",
     api_key: "",
     enabled: true,
+    nudge_tools: false,
     priority: 10,
     keyUrl: "https://console.groq.com/keys",
   },
@@ -36,6 +37,7 @@ const PRESETS: Record<string, ProviderInput & { keyUrl?: string; nameKey?: Messa
     model: "gemini-2.5-flash-lite",
     api_key: "",
     enabled: true,
+    nudge_tools: false,
     priority: 20,
     keyUrl: "https://aistudio.google.com/apikey",
   },
@@ -45,6 +47,7 @@ const PRESETS: Record<string, ProviderInput & { keyUrl?: string; nameKey?: Messa
     model: "meta-llama/llama-3.3-70b-instruct:free",
     api_key: "",
     enabled: true,
+    nudge_tools: false,
     priority: 30,
     keyUrl: "https://openrouter.ai/keys",
   },
@@ -55,6 +58,7 @@ const PRESETS: Record<string, ProviderInput & { keyUrl?: string; nameKey?: Messa
     model: "qwen2.5:3b",
     api_key: "",
     enabled: true,
+    nudge_tools: false,
     priority: 40,
   },
 };
@@ -70,8 +74,8 @@ const isLocal = (url: string) => /^https?:\/\/(localhost|127\.0\.0\.1)[:/]/.test
 type Draft = Omit<ProviderInput, "priority">;
 
 function toDraft(p: ProviderInput): Draft {
-  const { name, base_url, model, api_key, enabled } = p;
-  return { name, base_url, model, api_key, enabled };
+  const { name, base_url, model, api_key, enabled, nudge_tools } = p;
+  return { name, base_url, model, api_key, enabled, nudge_tools };
 }
 
 function ProviderEditDialog({
@@ -240,6 +244,14 @@ function ProviderEditDialog({
           />
         </VeitField>
         <VeitSettingsToggleRow variant="embed" label={t("enabled")} checked={draft.enabled} disabled={saving} onCheckedChange={(v) => set("enabled", v)} />
+        <VeitSettingsToggleRow
+          variant="embed"
+          label={t("nudgeTools")}
+          description={t("nudgeToolsHint")}
+          checked={draft.nudge_tools}
+          disabled={saving}
+          onCheckedChange={(v) => set("nudge_tools", v)}
+        />
         <VeitField label={t("connection")}>
           <div className="flex flex-col items-start gap-2">
             <div className="flex flex-wrap gap-2">
@@ -345,6 +357,7 @@ export function ProvidersPage() {
               model: provider.model,
               api_key: "",
               enabled: provider.enabled,
+              nudge_tools: provider.nudge_tools,
               priority: provider.priority,
             }),
           ),

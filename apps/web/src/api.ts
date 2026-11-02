@@ -47,6 +47,8 @@ export type Provider = {
   model: string;
   enabled: boolean;
   priority: number;
+  /** A first reply without a tool goes back once with a hint to use one. Off by default. */
+  nudge_tools: boolean;
   api_key_set: boolean;
   api_key_hint: string;
 };

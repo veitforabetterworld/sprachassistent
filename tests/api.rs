@@ -576,22 +576,40 @@ fn research_turn() -> ModelTurn {
 }
 
 #[tokio::test]
-async fn small_talk_is_never_forced_into_a_tool() {
+async fn small_talk_is_answered_at_once_without_nudge() {
     let Some((s, tools, device, _)) = named_tool_setup("web_research", Effect::Auto).await else {
         return;
     };
     s.llm.push(tool_turn(false, "Hallo!"));
-    s.llm.push(tool_turn(false, "Hallo, schön dich zu hören."));
+    let reply = chat(&s, device, "Hallo").await;
+    assert_eq!(reply["reply"], "Hallo!");
+    assert_eq!(*tools.calls.lock().unwrap(), 0);
+    assert_eq!(*s.llm.offered.lock().unwrap(), vec![(1, false)]);
+}
+
+#[tokio::test]
+async fn a_model_with_nudge_gets_its_first_reply_back_once_never_forced() {
+    let Some((s, tools, device, _)) = named_tool_setup("web_research", Effect::Auto).await else {
+        return;
+    };
+    s.llm.push(ModelTurn {
+        nudge_tools: true,
+        ..tool_turn(false, "Licht ist an.")
+    });
+    s.llm.push(ModelTurn {
+        nudge_tools: true,
+        ..tool_turn(false, "Hallo, schön dich zu hören.")
+    });
     let reply = chat(&s, device, "Hallo").await;
     assert_eq!(reply["reply"], "Hallo, schön dich zu hören.");
     assert_eq!(*tools.calls.lock().unwrap(), 0);
-    assert!(s
-        .llm
-        .offered
-        .lock()
-        .unwrap()
+    let offered = s.llm.offered.lock().unwrap();
+    assert_eq!(offered.len(), 2);
+    assert!(offered.iter().all(|(_, forced)| !forced));
+    let second = &s.llm.seen.lock().unwrap()[1].1;
+    assert!(second
         .iter()
-        .all(|(_, forced)| !forced));
+        .any(|m| m.content.starts_with("Neue Anfrage.")));
 }
 
 #[tokio::test]

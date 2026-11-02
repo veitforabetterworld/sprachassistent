@@ -117,6 +117,8 @@ pub struct ModelTurn {
     pub output_tokens: i32,
     /// Provider that produced this turn. The agent pins it for the rest of the run.
     pub provider: String,
+    /// That provider wants a reply without a tool sent back once (`Provider::nudge_tools`).
+    pub nudge_tools: bool,
 }
 
 /// Providers come with every call: each device has its own order (its provider first, then the others).
@@ -142,6 +144,8 @@ pub struct Provider {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    /// Off by default. For models that confirm actions from the history instead of calling a tool.
+    pub nudge_tools: bool,
 }
 
 impl Provider {
@@ -151,6 +155,7 @@ impl Provider {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             model,
+            nudge_tools: false,
         }
     }
 }
@@ -604,6 +609,8 @@ fn parse_turn(v: &Value, provider: &str) -> Result<ModelTurn> {
         input_tokens: v["usage"]["prompt_tokens"].as_i64().unwrap_or(0) as i32,
         output_tokens: v["usage"]["completion_tokens"].as_i64().unwrap_or(0) as i32,
         provider: provider.to_string(),
+        // `ask` sets it from the provider.
+        nudge_tools: false,
     })
 }
 
@@ -683,7 +690,11 @@ impl Llm {
     ) -> Result<ModelTurn> {
         let body = Self::body(provider, messages, false, json_mode, tools, force_tool);
         match self.post(provider, &body, ANSWER_WAIT).await {
-            Ok(resp) => parse_turn(&resp.json().await?, &provider.name),
+            Ok(resp) => {
+                let mut turn = parse_turn(&resp.json().await?, &provider.name)?;
+                turn.nudge_tools = provider.nudge_tools;
+                Ok(turn)
+            }
             Err(e) => {
                 let text = e.to_string();
                 if let Some(call) = salvage_tool_call(&text, tools) {
@@ -698,6 +709,7 @@ impl Llm {
                         input_tokens: 0,
                         output_tokens: 0,
                         provider: provider.name.clone(),
+                        nudge_tools: provider.nudge_tools,
                     });
                 }
                 bail!(text)

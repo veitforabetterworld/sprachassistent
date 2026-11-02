@@ -501,6 +501,7 @@ Argumente aus dem vorherigen Werkzeugergebnis übernehmen.",
             }
         }
         if should_nudge(
+            turn.nudge_tools,
             phase,
             turn.tool_calls.is_empty(),
             nudged,
@@ -887,16 +888,23 @@ async fn speak(say: &Option<mpsc::Sender<String>>, text: &str) -> bool {
     true
 }
 
-/// A text reply before any tool result is a guess from the old chat. After a lookup the
-/// same reply is the answer and must not be thrown away for another tool call.
+/// Only for models with `nudge_tools` on: their text reply before any tool result may be a
+/// confirmation copied from the old chat, so it goes back once with a hint to use a tool. After a
+/// lookup the same reply is the answer and must not be thrown away for another tool call.
 fn should_nudge(
+    model_wants_it: bool,
     phase: PromptPhase,
     no_tool_call: bool,
     nudged: bool,
     gathered: bool,
     lookup_offered: bool,
 ) -> bool {
-    phase == PromptPhase::Lookup && no_tool_call && !nudged && !gathered && lookup_offered
+    model_wants_it
+        && phase == PromptPhase::Lookup
+        && no_tool_call
+        && !nudged
+        && !gathered
+        && lookup_offered
 }
 
 const RATE_LIMIT_REPLY: &str = "Alle KI-Modelle sind gerade am Limit. Versuch es gleich nochmal.";
@@ -1046,17 +1054,54 @@ mod tests {
 
     #[test]
     fn answer_after_a_lookup_is_kept() {
-        assert!(should_nudge(PromptPhase::Lookup, true, false, false, true));
-        assert!(!should_nudge(PromptPhase::Lookup, true, false, true, true));
-        assert!(!should_nudge(PromptPhase::Lookup, true, true, false, true));
+        assert!(should_nudge(
+            true,
+            PromptPhase::Lookup,
+            true,
+            false,
+            false,
+            true
+        ));
         assert!(!should_nudge(
+            false,
+            PromptPhase::Lookup,
+            true,
+            false,
+            false,
+            true
+        ));
+        assert!(!should_nudge(
+            true,
+            PromptPhase::Lookup,
+            true,
+            false,
+            true,
+            true
+        ));
+        assert!(!should_nudge(
+            true,
+            PromptPhase::Lookup,
+            true,
+            true,
+            false,
+            true
+        ));
+        assert!(!should_nudge(
+            true,
             PromptPhase::Lookup,
             false,
             false,
             false,
             true
         ));
-        assert!(!should_nudge(PromptPhase::Answer, true, false, false, true));
+        assert!(!should_nudge(
+            true,
+            PromptPhase::Answer,
+            true,
+            false,
+            false,
+            true
+        ));
     }
 
     #[test]

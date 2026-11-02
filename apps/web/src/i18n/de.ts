@@ -153,6 +153,8 @@ export const de = {
   connection: "Verbindung",
   test: "Testen",
   testReply: "„{reply}“ in {ms} ms",
+  nudgeTools: "Zum Werkzeug anstoßen",
+  nudgeToolsHint: "Antwortet das Modell ohne Werkzeug, fragt der Chatbot einmal nach, ob aktuelle Daten oder eine Aktion nötig sind. Hilft bei Modellen, die Erledigtes aus dem Verlauf bestätigen; kostet bei Smalltalk einen zusätzlichen Aufruf.",
   testTools: "Werkzeug testen",
   testToolsReply: "Werkzeug aufgerufen in {ms} ms",
   testToolsText: "Kein Werkzeug, Antwort: „{reply}“",

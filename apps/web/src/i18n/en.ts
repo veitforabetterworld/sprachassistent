@@ -155,6 +155,8 @@ export const en: Record<MessageKey, string> = {
   connection: "Connection",
   test: "Test",
   testReply: "“{reply}” in {ms} ms",
+  nudgeTools: "Nudge towards tools",
+  nudgeToolsHint: "When the model answers without a tool, the chatbot asks once more whether current data or an action is needed. Helps with models that confirm actions from the history; costs one extra call for small talk.",
   testTools: "Test tool",
   testToolsReply: "Tool called in {ms} ms",
   testToolsText: "No tool, reply: “{reply}”",
