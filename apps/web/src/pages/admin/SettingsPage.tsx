@@ -194,7 +194,7 @@ export function SettingsPage() {
         </VeitStatusBadge>
       )}
       {values && (
-        <VeitSettingsSection title={t("settingsTitle")} description={t("settingsHint")}>
+        <VeitSettingsSection title={t("settingsTitle")}>
           <VeitList>
             {GROUPS.map((g) => (
               <VeitListItem

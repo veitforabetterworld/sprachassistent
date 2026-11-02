@@ -1,5 +1,5 @@
 import type { Request } from "express";
-import { AuthService, authFail, createAesGcmSecretBox, type UserId } from "@veit/auth-server";
+import { AuthService, authFail, createAesGcmSecretBox, isAuthError, type AuthMailer, type RequestInfo, type UserId } from "@veit/auth-server";
 import { createExpressAuth, getAuthUser } from "@veit/auth-server/express";
 import { createPgAuthStore } from "@veit/auth-server/pg";
 import { createSmtpMailer, germanMailTexts } from "@veit/auth-server/smtp";
@@ -7,7 +7,8 @@ import { ApiKeyError, ApiKeyService, type ApiKeyInput } from "@veit/api-keys";
 import { createExpressApiKeys } from "@veit/api-keys/express";
 import { createPgApiKeyStore } from "@veit/api-keys/pg";
 import { pool } from "./db.js";
-import { ensureSecret, getSetting } from "./settings.js";
+import { HttpError } from "./http.js";
+import { ensureSecret, getSetting, setSetting } from "./settings.js";
 
 /**
  * Accounts (veit-framework: @veit/auth-server, @veit/api-keys).
@@ -48,9 +49,27 @@ export async function isAdmin(userId: UserId): Promise<boolean> {
   return result.rows[0]?.is_admin ?? false;
 }
 
+/** On: a new account must confirm its address before it can use the app. Off when no SMTP is set up. */
+export async function verificationRequired(): Promise<boolean> {
+  return (await getSetting("account_verification")) === "1";
+}
+
+export async function setVerificationRequired(on: boolean): Promise<void> {
+  await setSetting("account_verification", on ? "1" : "0");
+}
+
+const smtpMailer = createSmtpMailer(smtpSettings, germanMailTexts("Sprachassistent"));
+const mailer: AuthMailer = {
+  ...smtpMailer,
+  sendVerification: async (input) => {
+    if (!(await verificationRequired())) return;
+    await smtpMailer.sendVerification(input);
+  },
+};
+
 export const authService = new AuthService({
   store: createPgAuthStore(pool),
-  mailer: createSmtpMailer(smtpSettings, germanMailTexts("Sprachassistent")),
+  mailer,
   secretBox: createAesGcmSecretBox(() => mfaKey, "sprachassistent-mfa-totp"),
   totpIssuer: "Sprachassistent",
   // Pages of apps/web.
@@ -62,19 +81,97 @@ export const authService = new AuthService({
       `UPDATE users SET is_admin = true WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin)`,
       [userId],
     );
+    if (await verificationRequired()) return;
+    await pool.query(
+      `UPDATE users SET email_verified_at = NOW(), email_verification_token = NULL, email_verification_expires_at = NULL WHERE id = $1`,
+      [userId],
+    );
   },
   beforeDeleteUser: async (userId) => {
-    if (!(await isAdmin(userId))) return;
-    const others = await pool.query(`SELECT 1 FROM users WHERE is_admin AND id <> $1 LIMIT 1`, [userId]);
-    if (others.rowCount === 0) authFail("auth.last_admin", 400);
+    if (await isAdmin(userId)) {
+      const others = await pool.query(`SELECT 1 FROM users WHERE is_admin AND id <> $1 LIMIT 1`, [userId]);
+      if (others.rowCount === 0) authFail("auth.last_admin", 400);
+    }
+    await pool.query(`DELETE FROM native_tool_policies WHERE user_id = $1`, [userId]);
+    await pool.query(`DELETE FROM oauth_states WHERE user_id = $1`, [userId]);
   },
 });
 
 export const auth = createExpressAuth({
   service: authService,
   cookieName: "spa_session",
-  extendUser: async (user) => ({ is_admin: await isAdmin(user.id) }),
+  extendUser: async (user) => ({
+    is_admin: await isAdmin(user.id),
+    verification_required: await verificationRequired(),
+  }),
 });
+
+export type AccountRow = {
+  id: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  email_verified_at: string | null;
+  is_admin: boolean;
+  created_at: string;
+};
+
+const ACCOUNT_COLUMNS = `id::text, email, first_name, last_name, email_verified_at, is_admin, created_at`;
+
+export async function listAccounts(): Promise<AccountRow[]> {
+  const result = await pool.query<AccountRow>(`SELECT ${ACCOUNT_COLUMNS} FROM users ORDER BY id`);
+  return result.rows;
+}
+
+export async function approveAccount(id: string): Promise<AccountRow> {
+  const result = await pool.query<AccountRow>(
+    `UPDATE users SET email_verified_at = COALESCE(email_verified_at, NOW()),
+       email_verification_token = NULL, email_verification_expires_at = NULL
+     WHERE id = $1 RETURNING ${ACCOUNT_COLUMNS}`,
+    [id],
+  );
+  if (!result.rows[0]) throw new HttpError(404, "Konto nicht gefunden");
+  return result.rows[0];
+}
+
+export async function removeAccount(actorId: UserId, targetId: string): Promise<void> {
+  if (String(actorId) === targetId) throw new HttpError(400, "Das eigene Konto löschst du unter Konto.");
+  const exists = await pool.query(`SELECT 1 FROM users WHERE id = $1`, [targetId]);
+  if (!exists.rows[0]) throw new HttpError(404, "Konto nicht gefunden");
+  try {
+    await authService.deleteAccount(targetId);
+  } catch (error) {
+    if (isAuthError(error) && error.code === "auth.last_admin") {
+      throw new HttpError(400, "Das letzte Adminkonto bleibt.");
+    }
+    throw error;
+  }
+}
+
+function requestInfo(req: Request): RequestInfo {
+  const forwarded = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim();
+  const proto = req.secure || forwarded === "https" ? "https" : "http";
+  const host = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "localhost").split(",")[0].trim();
+  return {
+    ip: req.ip ?? null,
+    userAgent: req.get("user-agent") ?? null,
+    origin: `${proto}://${host}`,
+    deviceName: null,
+  };
+}
+
+export async function sendResetLink(targetId: string, req: Request): Promise<void> {
+  const row = await pool.query<{ email: string }>(`SELECT email FROM users WHERE id = $1`, [targetId]);
+  if (!row.rows[0]) throw new HttpError(404, "Konto nicht gefunden");
+  try {
+    await authService.requestPasswordReset(row.rows[0].email, requestInfo(req));
+  } catch (error) {
+    if (!isAuthError(error)) throw error;
+    if (error.code === "auth.mail_unavailable") throw new HttpError(503, "E-Mail ist nicht eingerichtet.");
+    if (error.code === "auth.password_reset_too_many_requests") throw new HttpError(429, "Zu viele Links für diese Adresse.");
+    throw new HttpError(error.status, error.code);
+  }
+}
 
 /** A key always carries the fixed permission and exactly one chatbot. */
 function oneChatbot(resources: string[] | undefined): string[] {

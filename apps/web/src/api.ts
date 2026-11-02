@@ -6,7 +6,7 @@ import { getActiveLocale } from "./i18n/locale";
 import { trFormat } from "./i18n/translate";
 
 /** Signed-in user as apps/api sends it (@veit/auth-server) plus the admin flag. */
-export type AccountUser = VeitWireUser & { is_admin: boolean };
+export type AccountUser = VeitWireUser & { is_admin: boolean; verification_required: boolean };
 
 export const authClient = createRestAuthClient<AccountUser>("/v1", (wire) => wire as AccountUser);
 export const accountClient = createRestAccountClient("/v1", veitFetchJson, (iso) => formatLocalizedDateTime(getActiveLocale(), iso));
@@ -99,10 +99,26 @@ export type McpTool = {
   present: boolean;
 };
 export type NativeTool = { name: string; effect: ToolEffect; enabled: boolean };
+export type AdminAccount = {
+  id: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  email_verified_at: string | null;
+  is_admin: boolean;
+  created_at: string;
+};
 
 export const adminApi = {
   status: () => admin<Health>("/status"),
   voices: async () => (await admin<{ voices: Voice[] }>("/voices")).voices,
+
+  users: () => admin<{ users: AdminAccount[]; verification_required: boolean }>("/users"),
+  setVerificationRequired: (enabled: boolean) =>
+    admin<{ verification_required: boolean }>("/users/verification", "PUT", { enabled }),
+  approveUser: (id: string) => admin<AdminAccount>(`/users/${id}/approve`, "POST", {}),
+  resetUserPassword: (id: string) => admin<{ ok: boolean }>(`/users/${id}/password-reset`, "POST", {}),
+  deleteUser: (id: string) => admin<null>(`/users/${id}`, "DELETE"),
 
   settings: async () => (await admin<{ values: Record<string, string | boolean> }>("/settings")).values,
   settingSecret: async (key: string) => (await admin<{ value: string }>(`/settings/${key}/secret`)).value,

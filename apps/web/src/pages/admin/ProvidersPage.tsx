@@ -376,7 +376,6 @@ export function ProvidersPage() {
       )}
       <VeitSettingsSection
         title={t("providersTitle")}
-        description={t("providersHint")}
         actions={
           <VeitButton variant="secondary" onClick={() => setEditing("new")}>
             {t("add")}

@@ -542,9 +542,9 @@ fn common_prefix(left: &str, right: &str) -> usize {
 
 fn no_provider(errors: Vec<String>) -> anyhow::Error {
     if errors.is_empty() {
-        anyhow!("kein KI-Anbieter eingerichtet (Adminbereich: KI-Anbieter, API-Key eintragen)")
+        anyhow!("kein KI-Modell eingerichtet (Adminbereich: KI-Modelle, API-Key eintragen)")
     } else {
-        anyhow!("kein KI-Anbieter erreichbar ({})", errors.join("; "))
+        anyhow!("kein KI-Modell erreichbar ({})", errors.join("; "))
     }
 }
 
@@ -623,7 +623,7 @@ impl ChatModel for Llm {
         } else {
             let capable = providers_for_tools(providers, true);
             if capable.is_empty() {
-                bail!("kein KI-Anbieter kann Werkzeuge (im Anbieter „Werkzeuge“ einschalten)");
+                bail!("kein KI-Modell kann Werkzeuge (beim Modell „Werkzeuge“ einschalten)");
             }
             capable
         };

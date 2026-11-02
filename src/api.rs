@@ -305,7 +305,7 @@ async fn provider_test(
         .store
         .provider(id, &state.assistant.secrets)
         .await?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Anbieter nicht gefunden".into()))?;
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Modell nicht gefunden".into()))?;
     let messages = [ChatMessage::new(
         "user",
         "Antworte nur mit dem Wort: funktioniert",
@@ -333,7 +333,7 @@ async fn provider_tool_test(
         .store
         .provider(id, &state.assistant.secrets)
         .await?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Anbieter nicht gefunden".into()))?;
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Modell nicht gefunden".into()))?;
     let messages = [ChatMessage::new("user", "Rufe das Werkzeug ping auf.")];
     let tools = [ToolDef {
         name: "ping".into(),

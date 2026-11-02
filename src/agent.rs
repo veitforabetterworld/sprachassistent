@@ -353,6 +353,7 @@ async fn drive(
             return fail(&say, &mut guard, NO_ANSWER).await;
         }
     };
+    let all_providers = providers.clone();
     if providers.is_empty() {
         tracing::warn!(
             "{}: kein Anbieter mit Werkzeugen, Antwort ohne Werkzeuge",
@@ -397,6 +398,7 @@ async fn drive(
     let mut user_saved = !save_user;
     let mut phase = PromptPhase::Lookup;
     let mut nudged = false;
+    let mut gathered = false;
     let mut action_misses = 0;
     let mut settle = false;
     let mut research_steps = 0usize;
@@ -438,10 +440,35 @@ async fn drive(
             }
         };
         let force_tool = nudged && phase == PromptPhase::Lookup;
-        let mut turn = match llm
+        let mut turn_result = llm
             .complete(&providers, sent, offered, false, force_tool)
-            .await
-        {
+            .await;
+        let provider_down = match &turn_result {
+            Err(error) => {
+                providers.len() == 1
+                    && all_providers.len() > 1
+                    && transient_provider_failure(&error.to_string())
+            }
+            Ok(_) => false,
+        };
+        if provider_down {
+            let failed = providers[0].name.clone();
+            let others: Vec<Provider> = all_providers
+                .iter()
+                .filter(|provider| provider.name != failed)
+                .cloned()
+                .collect();
+            if !others.is_empty() {
+                tracing::warn!(
+                    "{}: {failed} ausgefallen, nächster Anbieter übernimmt",
+                    device.name
+                );
+                turn_result = llm
+                    .complete(&others, sent, offered, false, force_tool)
+                    .await;
+            }
+        }
+        let mut turn = match turn_result {
             Ok(turn) => turn,
             Err(e) => {
                 let detail = e.to_string();
@@ -476,8 +503,13 @@ Argumente aus dem vorherigen Werkzeugergebnis übernehmen.",
                 return fail(&say, &mut guard, &reply).await;
             }
         };
-        // Stay on the provider that answered. A later fallback would not share the tool transcript.
-        if let Some(provider) = providers.iter().find(|p| p.name == turn.provider).cloned() {
+        // Stay on the provider that answered. The transcript is in the messages, so a later
+        // outage can still move to the next provider.
+        if let Some(provider) = all_providers
+            .iter()
+            .find(|provider| provider.name == turn.provider)
+            .cloned()
+        {
             providers = vec![provider];
         }
         input_tokens += turn.input_tokens;
@@ -499,13 +531,15 @@ Argumente aus dem vorherigen Werkzeugergebnis übernehmen.",
                 turn.content.clear();
             }
         }
-        if phase == PromptPhase::Lookup
-            && turn.tool_calls.is_empty()
-            && !nudged
-            && offered
+        if should_nudge(
+            phase,
+            turn.tool_calls.is_empty(),
+            nudged,
+            gathered,
+            offered
                 .iter()
-                .any(|tool| tool_kind(&tool.name) != ToolKind::Action)
-        {
+                .any(|tool| tool_kind(&tool.name) != ToolKind::Action),
+        ) {
             nudged = true;
             messages.push(ChatMessage::new(
                 "system",
@@ -722,6 +756,9 @@ Erst nach dem neuen Lese-Ergebnis einzeln aufrufen, falls es noch nötig ist."
                 )
                 .await;
         }
+        if !finished.is_empty() {
+            gathered = true;
+        }
         if stop_research {
             messages.push(ChatMessage::new(
                 "system",
@@ -860,6 +897,26 @@ async fn speak(say: &Option<mpsc::Sender<String>>, text: &str) -> bool {
     true
 }
 
+/// A text reply before any tool result is a guess from the old chat. After a lookup the
+/// same reply is the answer and must not be thrown away for another tool call.
+fn should_nudge(
+    phase: PromptPhase,
+    no_tool_call: bool,
+    nudged: bool,
+    gathered: bool,
+    lookup_offered: bool,
+) -> bool {
+    phase == PromptPhase::Lookup && no_tool_call && !nudged && !gathered && lookup_offered
+}
+
+fn transient_provider_failure(detail: &str) -> bool {
+    ["429", "413", "502", "503", "504"]
+        .iter()
+        .any(|code| detail.contains(code))
+        || detail.to_ascii_lowercase().contains("timed out")
+        || detail.to_ascii_lowercase().contains("timeout")
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PromptPhase {
     Lookup,
@@ -981,6 +1038,30 @@ mod tests {
         assert_eq!(call.name, "web_search");
         assert!(call.arguments.contains("Schlagzeilen heute"));
         assert!(recover_text_tool_call(content, &[]).is_none());
+    }
+
+    #[test]
+    fn answer_after_a_lookup_is_kept() {
+        assert!(should_nudge(PromptPhase::Lookup, true, false, false, true));
+        assert!(!should_nudge(PromptPhase::Lookup, true, false, true, true));
+        assert!(!should_nudge(PromptPhase::Lookup, true, true, false, true));
+        assert!(!should_nudge(
+            PromptPhase::Lookup,
+            false,
+            false,
+            false,
+            true
+        ));
+        assert!(!should_nudge(PromptPhase::Answer, true, false, false, true));
+    }
+
+    #[test]
+    fn rate_limit_moves_to_the_next_provider() {
+        assert!(transient_provider_failure(
+            "Groq: HTTP 429 Too Many Requests: Rate limit reached"
+        ));
+        assert!(transient_provider_failure("HTTP 503"));
+        assert!(!transient_provider_failure("tool_use_failed"));
     }
 
     #[test]

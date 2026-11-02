@@ -489,7 +489,7 @@ export function McpPage() {
           </VeitList>
         )}
       </VeitSettingsSection>
-      <VeitSettingsSection title={t("nativeTitle")} description={t("nativeHint")}>
+      <VeitSettingsSection title={t("nativeTitle")}>
         <VeitList>
           {native.map((tool) => (
             <VeitListItem

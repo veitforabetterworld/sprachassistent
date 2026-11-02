@@ -15,6 +15,7 @@ const USER_NAV: Array<{ to: string; label: MessageKey }> = [
   { to: "/ki-anbieter", label: "navProviders" },
 ];
 const ADMIN_NAV: Array<{ to: string; label: MessageKey }> = [
+  { to: "/admin/benutzer", label: "navUsers" },
   { to: "/admin/einstellungen", label: "navSettings" },
 ];
 

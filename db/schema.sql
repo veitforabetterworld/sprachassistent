@@ -21,7 +21,8 @@ INSERT INTO app_settings (key, value) VALUES
   ('whisper_language', 'de'),
   ('tts_threads', '2'),
   ('google_oauth_client_id', ''),
-  ('google_oauth_client_secret', '')
+  ('google_oauth_client_secret', ''),
+  ('account_verification', '0')
 ON CONFLICT (key) DO NOTHING;
 
 -- OpenAI-compatible chat providers of one user, tried by ascending priority when a device has none of its own.
