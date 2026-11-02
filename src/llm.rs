@@ -161,7 +161,16 @@ impl Llm {
         if !p.api_key.is_empty() {
             req = req.bearer_auth(&p.api_key);
         }
-        let resp = req.send().await?;
+        // reqwest says "error sending request" for both; the admin test should name the reason.
+        let resp = req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                anyhow!("keine Antwort nach {} s", timeout.as_secs())
+            } else if e.is_connect() {
+                anyhow!("keine Verbindung zu {}", p.base_url)
+            } else {
+                e.into()
+            }
+        })?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -688,6 +697,50 @@ fn sse_tokens(resp: reqwest::Response) -> TokenStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn timeouts_and_refused_connections_say_so() {
+        let llm = Llm::new().unwrap();
+        // Accepts and never answers, like an overloaded model.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = silent.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((conn, _)) = silent.accept().await {
+                held.push(conn);
+            }
+        });
+        let provider = Provider::new(
+            "Stumm",
+            &format!("http://127.0.0.1:{port}"),
+            String::new(),
+            "m".into(),
+        );
+        let err = llm
+            .post(&provider, &json!({}), Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "keine Antwort nach 1 s");
+
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let provider = Provider::new(
+            "Weg",
+            &format!("http://127.0.0.1:{port}"),
+            String::new(),
+            "m".into(),
+        );
+        let err = llm
+            .post(&provider, &json!({}), Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("keine Verbindung zu http://127.0.0.1:"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn parses_sse_lines() {
