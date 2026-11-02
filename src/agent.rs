@@ -21,6 +21,11 @@ use crate::tools::{ToolExecutor, ToolOffer};
 const VOICE_BUDGET: Duration = Duration::from_secs(90);
 const TEXT_BUDGET: Duration = Duration::from_secs(110);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(20);
+/// Reading pages can wait for the headless browser, up to three pages one after another.
+const RESEARCH_TIMEOUT: Duration = Duration::from_secs(45);
+const TOOL_RESULT_CHARS: usize = 2000;
+/// One page with its links, or three shorter ones (`web::FOLLOW_MAX`), fit whole.
+const RESEARCH_RESULT_CHARS: usize = 6000;
 const APPROVAL_TTL_SECS: i64 = 600;
 const STILL_BUSY_AFTER: Duration = Duration::from_secs(15);
 const HISTORY_CHARS: usize = 180;
@@ -749,7 +754,12 @@ Erst nach dem neuen Lese-Ergebnis einzeln aufrufen, falls es noch nötig ist."
                 .map(String::as_str)
                 .unwrap_or(&call.name);
             let framed = frame_tool_result(label, body);
-            messages.push(ChatMessage::tool_result(&call.id, truncate(&framed, 2000)));
+            let limit = if tool_kind(&call.name) == ToolKind::Research {
+                RESEARCH_RESULT_CHARS
+            } else {
+                TOOL_RESULT_CHARS
+            };
+            messages.push(ChatMessage::tool_result(&call.id, truncate(&framed, limit)));
             let _ = store
                 .add_message_meta(
                     device.id,
@@ -836,8 +846,12 @@ async fn execute(
             if let Err(error) = validate_args(&schema, &args) {
                 return (call, format!("Fehler: {error}"));
             }
-            match tokio::time::timeout(TOOL_TIMEOUT, tools.execute(user_id, &call.name, args)).await
-            {
+            let timeout = if tool_kind(&call.name) == ToolKind::Research {
+                RESEARCH_TIMEOUT
+            } else {
+                TOOL_TIMEOUT
+            };
+            match tokio::time::timeout(timeout, tools.execute(user_id, &call.name, args)).await {
                 Ok(Ok(text)) => (call, text),
                 Ok(Err(error)) => (call, format!("Fehler: {error:#}")),
                 Err(_) => (call, "Zeitüberschreitung".into()),

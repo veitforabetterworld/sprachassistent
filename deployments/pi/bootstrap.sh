@@ -64,6 +64,9 @@ bash "$REPO/deployments/pi/download-models.sh"
 log "Websuche (SearXNG)"
 bash "$REPO/deployments/pi/searxng.sh"
 
+log "Browser (Chromium)"
+bash "$REPO/deployments/pi/browser.sh"
+
 log "Deploy-Key fuer root"
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh

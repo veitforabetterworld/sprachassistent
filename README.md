@@ -29,6 +29,9 @@ src/                 Rust-Sprachserver
   speech.rs          Whisper (Feature whisper) und Piper-Stimmen (Feature piper)
   llm.rs             OpenAI-kompatible Anbieter mit Fallback, Streaming
   tools.rs           Werkzeuge: Internetrecherche über selbstgehostetes SearXNG, MCP-Werkzeuge
+  web.rs             Seiten lesen (follow): nur öffentliche https-Adressen, Links mit Titel
+  page.rs            HTML als knapper Text ohne Kopf, Menüs und Linklisten
+  browser.rs         Headless-Chromium für JavaScript-Seiten, Proxy nur zu öffentlichen Adressen
   sentences.rs       Antwort-Stream in Sätze zerlegen
 db/schema.sql        Tabellen und Standardwerte (Rust und Web-API wenden es an)
 apps/api/            Web-API: @veit/auth-server, @veit/api-keys, Admin-Routen
@@ -53,6 +56,8 @@ In `.env` steht nur `DATABASE_URL` (Vorlage `.env.example`). Alles andere liegt 
 Das erste Konto, das sich registriert, wird Admin; danach ist die Registrierung geschlossen.
 
 Die Internetrecherche (`web_research`, Aktionen `news` und `search`) fragt nur das selbstgehostete SearXNG unter `SEARXNG_URL` (Standard `http://127.0.0.1:8888`), das JSON-Format muss an sein. Auf dem Pi läuft es als Docker-Container `sprachassistent-searxng` mit `deployments/pi/searxng/settings.yml`; `deployments/pi/searxng.sh` richtet ihn bei Bootstrap und jedem Deploy ein. Ist SearXNG nicht erreichbar, meldet das Werkzeug einen Fehler, es gibt keine andere Suchquelle.
+
+`follow` liest eine Seite oder bis zu drei auf einmal und hängt die Links aus dem Inhalt samt Titel an, denen das Modell weiter folgen kann. Liefert eine Seite kaum Text oder wird der Abruf abgelehnt, lädt sie ein Headless-Chromium (`BROWSER_BIN`, sonst `/usr/bin/chromium`). Chromium läuft nie als root, sondern per `setpriv` als `sprachassistent-browser` mit eigener Sandbox, ohne Bilder, und erreicht das Netz nur über einen Proxy im Sprachserver, der ausschließlich https zu öffentlichen Adressen durchlässt. `deployments/pi/browser.sh` installiert Chromium und legt das Konto an.
 
 ## API für die ESPs
 

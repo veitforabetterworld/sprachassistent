@@ -20,6 +20,9 @@ bash deployments/pi/download-models.sh
 log "Websuche (SearXNG)"
 bash deployments/pi/searxng.sh
 
+log "Browser (Chromium)"
+bash deployments/pi/browser.sh
+
 log "pnpm install (Web-API)"
 export CI=1
 corepack enable

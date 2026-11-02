@@ -415,6 +415,61 @@ fn only_link(line: &str) -> bool {
     any
 }
 
+/// Links in a piece of HTML as (address as written, visible text), in page order.
+pub fn links(html: &str) -> Vec<(String, String)> {
+    let lower = html.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(start) = find_tag(&lower, from, "a") {
+        let Some(open) = lower[start..].find('>') else {
+            break;
+        };
+        let inner = start + open + 1;
+        let close = find_close(&lower, inner, "a").unwrap_or(lower.len());
+        from = close.max(inner);
+        let Some(href) = attribute(&html[start..inner], "href") else {
+            continue;
+        };
+        let text = html_text(&html[inner..close], true)
+            .replace("## ", "")
+            .replace('\n', " ");
+        out.push((decode_entities(href.trim()), text));
+    }
+    out
+}
+
+/// Value of an attribute in an opening tag, quoted or not.
+fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0;
+    loop {
+        let at = from + lower[from..].find(name)?;
+        from = at + name.len();
+        let before = lower[..at].chars().last();
+        if !matches!(before, Some(c) if c.is_whitespace()) {
+            continue;
+        }
+        let rest = lower[from..].trim_start();
+        let Some(value) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let value = value.trim_start();
+        let offset = tag.len() - value.len();
+        return match value.chars().next()? {
+            quote @ ('"' | '\'') => {
+                let end = value[1..].find(quote)?;
+                Some(&tag[offset + 1..offset + 1 + end])
+            }
+            _ => {
+                let end = value
+                    .find(|c: char| c.is_whitespace() || c == '>')
+                    .unwrap_or(value.len());
+                Some(&tag[offset..offset + end])
+            }
+        };
+    }
+}
+
 pub fn decode_entities(text: &str) -> String {
     if !text.contains('&') {
         return text.to_string();
@@ -622,6 +677,23 @@ mod tests {
             let _ = readable(html);
         }
         assert_eq!(readable("ä<ö>ü</ö>ß").text, "äüß");
+    }
+
+    #[test]
+    fn links_come_with_their_text() {
+        let html = "<p>Siehe <a class=\"x\" href=\"/a?x=1&amp;y=2\">Teil <b>eins</b></a>, \
+                    <A HREF='https://b.de/c'>zwei</A>, <a href=/ohne-anfuehrung>drei</a>, \
+                    <a name=\"anker\">kein Link</a>, <a data-href=\"/falsch\" href=\"/richtig\">vier</a> \
+                    <a href=\"/kaputt";
+        assert_eq!(
+            links(html),
+            vec![
+                ("/a?x=1&y=2".to_string(), "Teil eins".to_string()),
+                ("https://b.de/c".to_string(), "zwei".to_string()),
+                ("/ohne-anfuehrung".to_string(), "drei".to_string()),
+                ("/richtig".to_string(), "vier".to_string()),
+            ]
+        );
     }
 
     #[test]

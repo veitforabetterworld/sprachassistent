@@ -15,6 +15,10 @@ pub struct Config {
     pub models_dir: PathBuf,
     /// Self-hosted SearXNG with the JSON format enabled (`deployments/pi/searxng`).
     pub searxng_url: String,
+    /// Headless Chromium for pages built by JavaScript; empty means /usr/bin/chromium if present.
+    pub browser_bin: String,
+    /// Account Chromium runs as when the server runs as root (`deployments/pi/browser.sh`).
+    pub browser_user: String,
 }
 
 impl Config {
@@ -31,6 +35,8 @@ impl Config {
                 .context("API_PORT ist keine Zahl")?,
             models_dir: var("MODELS_DIR", "models").into(),
             searxng_url: var("SEARXNG_URL", "http://127.0.0.1:8888"),
+            browser_bin: var("BROWSER_BIN", ""),
+            browser_user: var("BROWSER_USER", "sprachassistent-browser"),
         })
     }
 }

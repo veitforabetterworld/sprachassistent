@@ -2,15 +2,15 @@
 //! The model does not see whether the call goes to MCP, SearXNG or a function in this file.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::authz::{validate_args, Effect};
+use crate::browser::Browser;
 use crate::mcp;
-use crate::page;
 use crate::secrets::Secrets;
 use crate::store::{Store, ToolRow};
+use crate::web::{worth_reading, Reader, FOLLOW_MAX};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -74,20 +74,25 @@ pub struct LiveTools {
     store: Store,
     secrets: Secrets,
     http: reqwest::Client,
-    /// Only for `follow`: the model picks these addresses, so nothing inside the Pi or the home network.
-    page_http: reqwest::Client,
+    /// `follow`: the model picks these addresses, so nothing inside the Pi or the home network.
+    reader: Reader,
     rate: RateGate,
     /// Self-hosted SearXNG for `news` and `search`, without a trailing slash.
     searxng_url: String,
 }
 
 impl LiveTools {
-    pub fn new(store: Store, secrets: Secrets, searxng_url: &str) -> Result<Self> {
+    pub fn new(
+        store: Store,
+        secrets: Secrets,
+        searxng_url: &str,
+        browser: Option<Arc<Browser>>,
+    ) -> Result<Self> {
         Ok(Self {
             store,
             secrets,
             http: mcp::http_client()?,
-            page_http: public_page_client()?,
+            reader: Reader::new(browser)?,
             rate: RateGate::new(),
             searxng_url: searxng_url.trim_end_matches('/').to_string(),
         })
@@ -100,7 +105,8 @@ impl ToolExecutor for LiveTools {
         let mut offers = vec![native_offer(
             "web_research",
             "Internetrecherche. action ist news, search oder follow. news: Schlagzeilen, query optional. \
-search: Websuche, query nötig. follow: url einer https-Seite lesen, das Ergebnis nennt weitere Links. \
+search: Websuche, query nötig. follow: eine https-Seite lesen (url) oder bis zu drei auf einmal (urls). \
+Jede Seite endet mit Links samt Titel; interessanten Links folgst du wieder mit follow. \
 Mehrere Schritte sind erlaubt. Nicht für Geräte im Haus.",
             json!({
                 "type": "object",
@@ -112,7 +118,13 @@ Mehrere Schritte sind erlaubt. Nicht für Geräte im Haus.",
                         "description": "news: Schlagzeilen. search: Websuche. follow: eine Seite lesen."
                     },
                     "query": {"type": "string", "description": "Suchbegriff für news oder search."},
-                    "url": {"type": "string", "description": "https-Adresse für follow."}
+                    "url": {"type": "string", "description": "https-Adresse für follow."},
+                    "urls": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": FOLLOW_MAX,
+                        "description": "Mehrere https-Adressen für follow, höchstens drei."
+                    }
                 }
             }),
         )];
@@ -227,12 +239,19 @@ impl LiveTools {
             "news" => self.news_feed(query).await,
             "search" => self.web_search(query).await,
             "follow" => {
-                let url = args
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .trim();
-                follow_page(&self.page_http, url).await
+                let mut urls: Vec<String> = args
+                    .get("urls")
+                    .and_then(|v| v.as_array())
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
+                    urls.insert(0, url.to_string());
+                }
+                self.reader.follow(&urls).await
             }
             _ => anyhow::bail!("action muss news, search oder follow sein"),
         }
@@ -342,204 +361,6 @@ fn format_hits(hits: Vec<SearxHit>) -> String {
         .join("\n")
 }
 
-fn worth_reading(url: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    let path = parsed.path().trim_matches('/');
-    path.contains('/') || path.len() > 12
-}
-
-const FOLLOW_LINKS: usize = 5;
-/// Pages are read up to this size; the head alone of a news page can take 200 KB.
-const PAGE_BYTES: usize = 2_000_000;
-
-async fn follow_page(http: &reqwest::Client, url: &str) -> Result<String> {
-    if url.is_empty() {
-        anyhow::bail!("url fehlt");
-    }
-    let html = fetch_html(http, url).await?;
-    let page = page::readable(&html);
-    let mut out = if page.text.is_empty() {
-        "Kein lesbarer Text.".to_string()
-    } else {
-        page.text
-    };
-    let links = next_links(page.region, url);
-    if !links.is_empty() {
-        out.push_str("\n\nWeitere Links:\n");
-        for link in links {
-            out.push_str("- ");
-            out.push_str(&link);
-            out.push('\n');
-        }
-    }
-    Ok(out)
-}
-
-/// Article links from the content of a page. Homepages, files and non-public addresses stay out.
-fn next_links(html: &str, base: &str) -> Vec<String> {
-    let Ok(base_url) = reqwest::Url::parse(base) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    let mut rest = html;
-    while out.len() < FOLLOW_LINKS {
-        let Some(at) = rest.find("href=\"") else {
-            break;
-        };
-        rest = &rest[at + 6..];
-        let Some(end) = rest.find('"') else {
-            break;
-        };
-        let raw = page::decode_entities(&rest[..end]);
-        rest = &rest[end..];
-        let Ok(mut absolute) = base_url.join(raw.trim()) else {
-            continue;
-        };
-        absolute.set_fragment(None);
-        let url = absolute.to_string();
-        if !public_url_ok(&absolute)
-            || !worth_reading(&url)
-            || is_file(&absolute)
-            || url == base
-            || out.iter().any(|have| have == &url)
-        {
-            continue;
-        }
-        out.push(url);
-    }
-    out
-}
-
-fn is_file(url: &reqwest::Url) -> bool {
-    let path = url.path().to_ascii_lowercase();
-    [
-        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".avif", ".ico", ".css", ".js", ".json",
-        ".xml", ".woff", ".woff2", ".pdf", ".zip", ".mp3", ".mp4",
-    ]
-    .iter()
-    .any(|ext| path.ends_with(ext))
-}
-
-/// https on a public host. The resolver and the redirect policy of `public_page_client` check the rest.
-fn public_url_ok(url: &reqwest::Url) -> bool {
-    if url.scheme() != "https" {
-        return false;
-    }
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    // The URL parser already turned spellings like 0x7f.1 into 127.0.0.1.
-    let bare = host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = bare.parse::<IpAddr>() {
-        return public_ip(ip);
-    }
-    let domain = host.trim_end_matches('.').to_ascii_lowercase();
-    domain != "localhost" && !domain.ends_with(".localhost")
-}
-
-fn public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let [a, b, ..] = v4.octets();
-            !(v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || a == 0
-                || a >= 224
-                || (a == 100 && (b & 0xc0) == 64)
-                || (a == 198 && (b & 0xfe) == 18))
-        }
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return public_ip(IpAddr::V4(v4));
-            }
-            let first = v6.segments()[0];
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (first & 0xfe00) == 0xfc00
-                || (first & 0xffc0) == 0xfe80)
-        }
-    }
-}
-
-/// Resolves host names to public addresses only, so a name pointing into the home network fails
-/// and a name with both kinds of addresses is reached on the public ones.
-struct PublicOnly;
-
-impl reqwest::dns::Resolve for PublicOnly {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        Box::pin(async move {
-            let host = name.as_str().to_string();
-            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await?
-                .filter(|addr| public_ip(addr.ip()))
-                .collect();
-            if addrs.is_empty() {
-                return Err(format!("{host} ist keine öffentliche Adresse").into());
-            }
-            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
-        })
-    }
-}
-
-fn public_page_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
-        .no_proxy()
-        .dns_resolver(Arc::new(PublicOnly))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 3 {
-                attempt.error("zu viele Weiterleitungen")
-            } else if public_url_ok(attempt.url()) {
-                attempt.follow()
-            } else {
-                attempt.error("Weiterleitung auf eine nicht öffentliche Adresse")
-            }
-        }))
-        .build()?)
-}
-
-async fn fetch_html(http: &reqwest::Client, url: &str) -> Result<String> {
-    let parsed = reqwest::Url::parse(url).map_err(|_| anyhow!("keine gültige Adresse"))?;
-    if !public_url_ok(&parsed) {
-        anyhow::bail!("nur öffentliche https-Adressen");
-    }
-    let mut resp = http
-        .get(url)
-        .header(reqwest::header::USER_AGENT, "Mozilla/5.0")
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("Seite: HTTP {}", resp.status());
-    }
-    let kind = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !(kind.starts_with("text/") || kind.contains("xhtml") || kind.is_empty()) {
-        anyhow::bail!("keine Webseite");
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = resp.chunk().await? {
-        bytes.extend_from_slice(&chunk);
-        if bytes.len() >= PAGE_BYTES {
-            bytes.truncate(PAGE_BYTES);
-            break;
-        }
-    }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,80 +417,6 @@ mod tests {
 - Ohne
   https://example.com/c/d"
         );
-    }
-
-    #[test]
-    fn follow_only_reaches_public_https_addresses() {
-        let ok = |url: &str| public_url_ok(&reqwest::Url::parse(url).unwrap());
-        assert!(ok("https://www.tagesschau.de/inland/haushalt-100.html"));
-        assert!(ok("https://8.8.8.8/"));
-        for blocked in [
-            "http://www.tagesschau.de/",
-            "https://localhost/",
-            "https://LOCALHOST./",
-            "https://api.localhost/",
-            "https://127.0.0.1:3020/v1/health",
-            "https://0x7f.1/",
-            "https://0.0.0.0/",
-            "https://10.0.0.5/",
-            "https://172.16.1.1/",
-            "https://192.168.178.1/",
-            "https://169.254.169.254/latest/meta-data",
-            "https://100.64.0.1/",
-            "https://[::1]/",
-            "https://[::ffff:127.0.0.1]/",
-            "https://[fd00::1]/",
-            "https://[fe80::1]/",
-            "file:///etc/passwd",
-        ] {
-            assert!(!ok(blocked), "{blocked}");
-        }
-    }
-
-    #[tokio::test]
-    async fn follow_client_refuses_names_of_private_addresses() {
-        let client = public_page_client().unwrap();
-        let err = client.get("https://localhost:9/").send().await.unwrap_err();
-        assert!(
-            format!("{err:?}").contains("keine öffentliche Adresse"),
-            "{err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn follow_refuses_internal_pages() {
-        let client = public_page_client().unwrap();
-        for url in ["http://127.0.0.1:3020/v1/health", "https://192.168.178.1/"] {
-            let err = follow_page(&client, url).await.unwrap_err();
-            assert!(err.to_string().contains("öffentliche"), "{err}");
-        }
-    }
-
-    #[test]
-    fn follow_keeps_articles_and_drops_homepages() {
-        let html = r#"
-            <a href="https://www.tagesschau.de/">Start</a>
-            <a href="/inland/haushalt-100.html">Artikel</a>
-            <a href="javascript:void(0)">Skript</a>
-            <a href="http://example.com/a/b">Klartext</a>
-            <a href="https://www.zdfheute.de/newsticker/schlagzeilen-100.html">ZDF</a>
-        "#;
-        let links = next_links(html, "https://www.tagesschau.de/inland/index.html");
-        assert_eq!(
-            links,
-            vec![
-                "https://www.tagesschau.de/inland/haushalt-100.html".to_string(),
-                "https://www.zdfheute.de/newsticker/schlagzeilen-100.html".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn article_paths_are_read_before_homepages() {
-        assert!(worth_reading(
-            "https://www.zdfheute.de/newsticker/schlagzeilen-100.html"
-        ));
-        assert!(!worth_reading("https://www.tagesschau.de/"));
     }
 
     #[test]

@@ -7,6 +7,7 @@ use tracing_subscriber::EnvFilter;
 
 use sprachassistent::api::{self, AppState};
 use sprachassistent::assistant::Assistant;
+use sprachassistent::browser::Browser;
 use sprachassistent::config::Config;
 use sprachassistent::llm::Llm;
 use sprachassistent::secrets::Secrets;
@@ -38,10 +39,14 @@ async fn main() -> Result<()> {
     tracing::info!("Stimmen: {:?}", voices.list());
 
     let secrets = Secrets::from_env();
+    let browser = Browser::start(Some(&config.browser_bin), &config.browser_user)
+        .await
+        .map(Arc::new);
     let tools = Arc::new(LiveTools::new(
         store.clone(),
         secrets.clone(),
         &config.searxng_url,
+        browser,
     )?);
     let state = AppState {
         assistant: Arc::new(Assistant {
