@@ -95,7 +95,7 @@ export function adminRouter(): Router {
   router.put(
     "/settings",
     handle(async (req, res) => {
-      await saveSettings(parse(z.record(z.string()), req.body?.values));
+      await saveSettings(parse(z.record(z.string(), z.string()), req.body?.values));
       res.json({ values: await listSettings() });
     }),
   );
