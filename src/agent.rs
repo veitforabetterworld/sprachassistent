@@ -419,6 +419,7 @@ async fn drive(
     let mut action_misses = 0;
     let mut settle = false;
     let mut research_steps = 0usize;
+    let mut researched = std::collections::HashSet::new();
     loop {
         if started.elapsed() > budget || iterations >= limit {
             return fail(&say, &mut guard, TOO_LONG).await;
@@ -624,6 +625,13 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
             };
             let mut exec = call;
             exec.name = offer.name.clone();
+            // The same page or search twice only costs tokens; the first result is still above.
+            if tool_kind(&exec.name) == ToolKind::Research
+                && !researched.insert(research_key(&exec.arguments))
+            {
+                finished.push((exec, ALREADY_READ.into()));
+                continue;
+            }
             match offer.effect {
                 Effect::Confirm => confirm.push(exec),
                 Effect::Auto => auto.push(exec),
@@ -1018,6 +1026,16 @@ fn recover_text_tool_call(content: &str, defs: &[ToolDef]) -> Option<ToolCall> {
     defs.iter().any(|def| def.name == call.name).then_some(call)
 }
 
+const ALREADY_READ: &str =
+    "Schon gelesen, das Ergebnis steht weiter oben. Nimm einen anderen Link oder antworte.";
+
+/// Arguments of a research call with the order of keys and spacing evened out.
+fn research_key(arguments: &str) -> String {
+    serde_json::from_str::<Value>(arguments)
+        .map(|args| args.to_string())
+        .unwrap_or_else(|_| arguments.trim().to_string())
+}
+
 fn search_follow_up(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     let mut out = Vec::new();
     let mut systems = messages.iter().filter(|message| message.role == "system");
@@ -1141,5 +1159,14 @@ mod tests {
             tool_kind("assist__assist_satellite__HassBroadcast"),
             ToolKind::Action
         );
+    }
+
+    #[test]
+    fn the_same_research_call_is_recognised_despite_spacing() {
+        let first = research_key(r#"{"action":"follow","url":"https://a.de/x"}"#);
+        let again = research_key(" {\"action\": \"follow\",\n \"url\": \"https://a.de/x\"} ");
+        let other = research_key(r#"{"action":"follow","url":"https://a.de/y"}"#);
+        assert_eq!(first, again);
+        assert_ne!(first, other);
     }
 }
