@@ -29,13 +29,6 @@ type Group = { id: string; title: MessageKey; description: MessageKey; fields: F
 
 const GROUPS: Group[] = [
   {
-    id: "accounts",
-    title: "accountsTitle",
-    description: "accountsHint",
-    fields: [{ key: "registration_open", label: "registrationOpen", kind: "toggle" }],
-    summary: (v, t) => (v.registration_open === "1" ? t("registrationOpen") : t("registrationClosed")),
-  },
-  {
     id: "smtp",
     title: "smtpTitle",
     description: "smtpHint",
@@ -49,6 +42,19 @@ const GROUPS: Group[] = [
     ],
     summary: (v, t, tf) =>
       v.smtp_host ? tf("smtpSummary", { host: String(v.smtp_host), port: String(v.smtp_port), from: String(v.smtp_from || t("smtpNoFrom")) }) : t("notConfigured"),
+  },
+  {
+    id: "tools",
+    title: "toolsTitle",
+    description: "toolsHint",
+    fields: [
+      { key: "google_oauth_client_id", label: "googleClientId", kind: "text", hint: "googleOAuthHint" },
+      { key: "google_oauth_client_secret", label: "googleClientSecret", kind: "password" },
+    ],
+    summary: (v, t, tf) =>
+      tf("toolsSummary", {
+        google: v.google_oauth_client_id ? t("on") : t("off"),
+      }),
   },
   {
     id: "speech",

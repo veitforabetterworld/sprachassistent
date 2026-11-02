@@ -4,18 +4,22 @@
 use std::collections::HashMap;
 
 use anyhow::{bail, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::llm::Provider;
+use crate::mcp::DiscoveredTool;
+use crate::secrets::Secrets;
 
 const SCHEMA: &str = include_str!("../db/schema.sql");
 /// Same number as SCHEMA_LOCK in apps/api/src/db.ts.
 const SCHEMA_LOCK: i64 = 7_351_402;
-/// Same prefix and permission as apps/api/src/accounts.ts.
+/// Same prefix as apps/api/src/accounts.ts. Every key is stored with this permission; callers do not choose one.
 const KEY_PREFIX: &str = "spa_";
 const DEVICE_TALK: &str = "device.talk";
 /// Older messages are deleted; what matters long-term ends up in the facts.
@@ -24,6 +28,7 @@ const KEEP_MESSAGES: i64 = 1000;
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct Device {
     pub id: Uuid,
+    pub user_id: Option<i64>,
     pub name: String,
     pub voice: String,
     pub speed: f32,
@@ -31,18 +36,24 @@ pub struct Device {
     pub provider_id: Option<Uuid>,
     pub history_messages: i32,
     pub memory_extraction: bool,
+    pub max_iterations: i32,
+    pub busy_phrase: String,
+    pub still_busy_phrase: String,
+    pub tools_enabled: bool,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, PartialEq)]
 pub struct Fact {
     pub id: i64,
     pub content: String,
+    pub origin: String,
 }
 
 #[derive(Debug, Clone, FromRow)]
 pub struct StoredMessage {
     pub role: String,
     pub content: String,
+    pub metadata: Value,
 }
 
 /// Changes the model proposes after a conversation.
@@ -66,13 +77,12 @@ struct ProviderRow {
     base_url: String,
     api_key: String,
     model: String,
+    supports_tools: bool,
 }
 
-impl From<ProviderRow> for Provider {
-    fn from(r: ProviderRow) -> Self {
-        Provider::new(&r.name, &r.base_url, r.api_key, r.model)
-    }
-}
+const DEVICE_COLUMNS: &str =
+    "id, user_id, name, voice, speed, persona, provider_id, history_messages, \
+     memory_extraction, max_iterations, busy_phrase, still_busy_phrase, tools_enabled";
 
 #[derive(Clone)]
 pub struct Store {
@@ -109,52 +119,65 @@ impl Store {
     }
 
     pub async fn device(&self, id: Uuid) -> Result<Option<Device>> {
-        Ok(sqlx::query_as(
-            "SELECT id, name, voice, speed, persona, provider_id, history_messages, memory_extraction
-             FROM devices WHERE id = $1",
-        )
+        Ok(sqlx::query_as(&format!(
+            "SELECT {DEVICE_COLUMNS} FROM devices WHERE id = $1"
+        ))
         .bind(id)
         .fetch_optional(&self.pool)
         .await?)
     }
 
-    /// The device's own provider first, then the others by priority. Providers without a key are only
-    /// used when they run locally (Ollama).
-    pub async fn providers_for(&self, device: &Device) -> Result<Vec<Provider>> {
+    /// The device's own provider first, then the owner's others by priority. A provider id that
+    /// belongs to someone else is ignored. Providers without a key are only used when they run locally.
+    pub async fn providers_for(&self, device: &Device, secrets: &Secrets) -> Result<Vec<Provider>> {
+        let Some(user_id) = device.user_id else {
+            return Ok(Vec::new());
+        };
         let rows: Vec<ProviderRow> = sqlx::query_as(
-            "SELECT name, base_url, api_key, model FROM llm_providers
-             WHERE enabled AND (api_key <> '' OR base_url ~ '^https?://(localhost|127\\.0\\.0\\.1)[:/]')
+            "SELECT name, base_url, api_key, model, supports_tools FROM llm_providers
+             WHERE user_id = $2
+               AND enabled AND (api_key <> '' OR base_url ~ '^https?://(localhost|127\\.0\\.0\\.1)[:/]')
              ORDER BY (id = $1) DESC, priority, name",
         )
         .bind(device.provider_id)
+        .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(Provider::from).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| self.provider_from(r, secrets))
+            .collect())
     }
 
-    pub async fn provider(&self, id: Uuid) -> Result<Option<Provider>> {
+    pub async fn provider(&self, id: Uuid, secrets: &Secrets) -> Result<Option<Provider>> {
         let row: Option<ProviderRow> = sqlx::query_as(
-            "SELECT name, base_url, api_key, model FROM llm_providers WHERE id = $1",
+            "SELECT name, base_url, api_key, model, supports_tools FROM llm_providers WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(Provider::from))
+        Ok(row.and_then(|r| self.provider_from(r, secrets)))
     }
 
-    pub async fn provider_names(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT name FROM llm_providers
-             WHERE enabled AND (api_key <> '' OR base_url ~ '^https?://(localhost|127\\.0\\.0\\.1)[:/]')
-             ORDER BY priority, name",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.into_iter().map(|(n,)| n).collect())
+    fn provider_from(&self, row: ProviderRow, secrets: &Secrets) -> Option<Provider> {
+        let api_key = match secrets.decrypt(&row.api_key) {
+            Ok(key) => key,
+            Err(e) => {
+                tracing::error!("{}: Schlüssel nicht lesbar: {e:#}", row.name);
+                return None;
+            }
+        };
+        Some(Provider::new(
+            &row.name,
+            &row.base_url,
+            api_key,
+            row.model,
+            row.supports_tools,
+        ))
     }
 
-    /// The device an ESP key may talk as. A key of an admin with `device.talk`; `requested` picks one when
-    /// the key covers several devices.
+    /// The chatbot an API key may talk as. The key's user must own it. A key names one chatbot, so
+    /// `requested` is only needed when an older key still covers more than one.
     pub async fn authenticate_device(
         &self,
         raw_key: &str,
@@ -168,46 +191,76 @@ impl Store {
                 .fetch_optional(&self.pool)
                 .await?;
         let hash = hash_api_key(raw_key, pepper.map(|p| p.0).as_deref().unwrap_or(""));
-        let key: Option<(Uuid, bool, Vec<String>)> = sqlx::query_as(
-            "UPDATE user_api_keys k SET last_used_at = NOW() FROM users u
-             WHERE k.user_id = u.id AND u.is_admin AND k.key_hash = $1 AND k.revoked_at IS NULL
-               AND $2 = ANY(k.permissions)
-             RETURNING k.id, k.all_resources, k.resources",
+        let key: Option<(i64, bool, Vec<String>)> = sqlx::query_as(
+            "UPDATE user_api_keys SET last_used_at = NOW()
+             WHERE key_hash = $1 AND revoked_at IS NULL AND $2 = ANY(permissions)
+             RETURNING user_id, all_resources, resources",
         )
         .bind(&hash)
         .bind(DEVICE_TALK)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((_, all, resources)) = key else {
+        let Some((user_id, all, resources)) = key else {
             bail!("unbekannter Schluessel");
         };
-        let id = match requested {
-            Some(id) if all || resources.contains(&id.to_string()) => id,
-            Some(_) => bail!("Schluessel gilt nicht fuer dieses Geraet"),
-            None if resources.len() == 1 => resources[0].parse()?,
-            None => {
-                let ids: Vec<(Uuid,)> = sqlx::query_as("SELECT id FROM devices LIMIT 2")
-                    .fetch_all(&self.pool)
-                    .await?;
-                match ids.as_slice() {
-                    [(only,)] if all => *only,
-                    _ => bail!("Geraet fehlt (?device=<id>)"),
-                }
-            }
-        };
+        let id = self
+            .owned_device(user_id, all, &resources, requested)
+            .await?;
         match self.device(id).await? {
-            Some(device) => Ok(device),
+            Some(device) if device.user_id == Some(user_id) => Ok(device),
+            Some(_) => bail!("Schluessel gilt nicht fuer dieses Geraet"),
             None => bail!("Geraet gibt es nicht"),
         }
     }
 
+    async fn owned_device(
+        &self,
+        user_id: i64,
+        all: bool,
+        resources: &[String],
+        requested: Option<Uuid>,
+    ) -> Result<Uuid> {
+        let ids: Vec<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM devices
+             WHERE user_id = $1 AND ($2 OR id::text = ANY($3))
+             ORDER BY created_at",
+        )
+        .bind(user_id)
+        .bind(all)
+        .bind(resources)
+        .fetch_all(&self.pool)
+        .await?;
+        match requested {
+            Some(id) if ids.iter().any(|(found,)| *found == id) => Ok(id),
+            Some(_) => bail!("Schluessel gilt nicht fuer dieses Geraet"),
+            None => match ids.as_slice() {
+                [(only,)] => Ok(*only),
+                _ => bail!("Geraet fehlt (?device=<id>)"),
+            },
+        }
+    }
+
     pub async fn add_message(&self, device: Uuid, role: &str, content: &str) -> Result<()> {
-        sqlx::query("INSERT INTO device_messages (device_id, role, content) VALUES ($1, $2, $3)")
-            .bind(device)
-            .bind(role)
-            .bind(content)
-            .execute(&self.pool)
-            .await?;
+        self.add_message_meta(device, role, content, json!({}))
+            .await
+    }
+
+    pub async fn add_message_meta(
+        &self,
+        device: Uuid,
+        role: &str,
+        content: &str,
+        metadata: Value,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO device_messages (device_id, role, content, metadata) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(device)
+        .bind(role)
+        .bind(content)
+        .bind(metadata)
+        .execute(&self.pool)
+        .await?;
         sqlx::query(
             "DELETE FROM device_messages WHERE device_id = $1 AND id <=
                (SELECT MAX(id) FROM device_messages WHERE device_id = $1) - $2",
@@ -222,8 +275,8 @@ impl Store {
     /// The last `limit` messages, oldest first.
     pub async fn recent_messages(&self, device: Uuid, limit: i32) -> Result<Vec<StoredMessage>> {
         Ok(sqlx::query_as(
-            "SELECT role, content FROM
-               (SELECT id, role, content FROM device_messages WHERE device_id = $1 ORDER BY id DESC LIMIT $2) m
+            "SELECT role, content, metadata FROM
+               (SELECT id, role, content, metadata FROM device_messages WHERE device_id = $1 ORDER BY id DESC LIMIT $2) m
              ORDER BY id",
         )
         .bind(device)
@@ -233,12 +286,12 @@ impl Store {
     }
 
     pub async fn facts(&self, device: Uuid) -> Result<Vec<Fact>> {
-        Ok(
-            sqlx::query_as("SELECT id, content FROM device_facts WHERE device_id = $1 ORDER BY id")
-                .bind(device)
-                .fetch_all(&self.pool)
-                .await?,
+        Ok(sqlx::query_as(
+            "SELECT id, content, origin FROM device_facts WHERE device_id = $1 ORDER BY id",
         )
+        .bind(device)
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     pub async fn apply(&self, device: Uuid, changes: &FactChanges) -> Result<()> {
@@ -275,6 +328,301 @@ impl Store {
         tx.commit().await?;
         Ok(())
     }
+
+    /// The facts that go into a prompt: the 30 newest, plus older ones whose text matches the question.
+    pub async fn facts_for_prompt(&self, device: Uuid, user_text: &str) -> Result<Vec<Fact>> {
+        let mut facts: Vec<Fact> = sqlx::query_as(
+            "SELECT id, content, origin FROM device_facts
+             WHERE device_id = $1 ORDER BY updated_at DESC, id DESC LIMIT 30",
+        )
+        .bind(device)
+        .fetch_all(&self.pool)
+        .await?;
+        let words = prompt_words(user_text);
+        if words.is_empty() {
+            return Ok(facts);
+        }
+        let patterns: Vec<String> = words.iter().map(|w| format!("%{w}%")).collect();
+        let have: Vec<i64> = facts.iter().map(|f| f.id).collect();
+        let extra: Vec<Fact> = sqlx::query_as(
+            "SELECT id, content, origin FROM device_facts
+             WHERE device_id = $1 AND NOT (id = ANY($2)) AND content ILIKE ANY($3)
+             ORDER BY updated_at DESC LIMIT 10",
+        )
+        .bind(device)
+        .bind(&have)
+        .bind(&patterns)
+        .fetch_all(&self.pool)
+        .await?;
+        facts.extend(extra);
+        Ok(facts)
+    }
+
+    pub async fn insert_run(
+        &self,
+        user_id: i64,
+        device_id: Uuid,
+        channel: &str,
+        user_text: &str,
+    ) -> Result<Uuid> {
+        let (id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO agent_runs (user_id, device_id, channel, status, user_text)
+             VALUES ($1, $2, $3, 'running', $4) RETURNING id",
+        )
+        .bind(user_id)
+        .bind(device_id)
+        .bind(channel)
+        .bind(user_text)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_step(
+        &self,
+        run_id: Uuid,
+        seq: i32,
+        kind: &str,
+        name: &str,
+        payload: Value,
+        duration_ms: i32,
+        error: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO agent_run_steps (run_id, seq, kind, name, payload, duration_ms, error)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(run_id)
+        .bind(seq)
+        .bind(kind)
+        .bind(name)
+        .bind(payload)
+        .bind(duration_ms)
+        .bind(error)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finish_run(
+        &self,
+        id: Uuid,
+        status: &str,
+        reply: &str,
+        error: &str,
+        iterations: i32,
+        input_tokens: i32,
+        output_tokens: i32,
+        pending: Option<Value>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE agent_runs SET status = $2, final_text = $3, error = $4, iterations = $5,
+                 input_tokens = $6, output_tokens = $7, pending_tools = $8,
+                 finished_at = CASE WHEN $2 = 'waiting_for_approval' THEN NULL ELSE NOW() END
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(reply)
+        .bind(error)
+        .bind(iterations)
+        .bind(input_tokens)
+        .bind(output_tokens)
+        .bind(pending)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn cancel_run_if_running(&self, id: Uuid) -> Result<()> {
+        sqlx::query(
+            "UPDATE agent_runs SET status = 'cancelled', error = 'abgebrochen', finished_at = NOW()
+             WHERE id = $1 AND status = 'running'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn pending_approval(&self, device: Uuid) -> Result<Option<PendingRun>> {
+        Ok(sqlx::query_as(
+            "SELECT id, COALESCE(pending_tools, '{}'::jsonb) AS pending_tools, started_at FROM agent_runs
+             WHERE device_id = $1 AND status = 'waiting_for_approval'
+             ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(device)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn cancel_pending(&self, id: Uuid) -> Result<()> {
+        sqlx::query(
+            "UPDATE agent_runs SET status = 'cancelled', error = 'neue Anfrage', finished_at = NOW()
+             WHERE id = $1 AND status = 'waiting_for_approval'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The user answered the confirmation, so this run must not be offered again.
+    pub async fn close_pending(&self, id: Uuid) -> Result<()> {
+        sqlx::query(
+            "UPDATE agent_runs SET status = 'completed', finished_at = NOW()
+             WHERE id = $1 AND status = 'waiting_for_approval'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mcp_server(&self, id: Uuid) -> Result<Option<McpServer>> {
+        Ok(sqlx::query_as(
+            "SELECT id, user_id, name, transport, url, enabled, auth_type, secret_enc, oauth_enc
+             FROM mcp_servers WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn set_mcp_status(&self, id: Uuid, status: &str, error: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE mcp_servers SET status = $2, last_error = $3,
+                 last_ok_at = CASE WHEN $2 = 'ok' THEN NOW() ELSE last_ok_at END
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(error)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_oauth(&self, id: Uuid, oauth_enc: &str) -> Result<()> {
+        sqlx::query("UPDATE mcp_servers SET oauth_enc = $2 WHERE id = $1")
+            .bind(id)
+            .bind(oauth_enc)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn replace_mcp_tools(&self, server: Uuid, tools: &[DiscoveredTool]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE mcp_tools SET present = false WHERE server_id = $1")
+            .bind(server)
+            .execute(&mut *tx)
+            .await?;
+        for tool in tools {
+            sqlx::query(
+                "INSERT INTO mcp_tools (server_id, name, description, input_schema, annotations, effect, present)
+                 VALUES ($1, $2, $3, $4, $5, $6, true)
+                 ON CONFLICT (server_id, name) DO UPDATE SET
+                   description = EXCLUDED.description,
+                   input_schema = EXCLUDED.input_schema,
+                   annotations = EXCLUDED.annotations,
+                   present = true",
+            )
+            .bind(server)
+            .bind(&tool.name)
+            .bind(&tool.description)
+            .bind(&tool.input_schema)
+            .bind(&tool.annotations)
+            .bind(tool.effect.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn mcp_tools_for(&self, user_id: i64) -> Result<Vec<ToolRow>> {
+        Ok(sqlx::query_as(
+            "SELECT t.name, t.description, t.input_schema, t.annotations, t.effect, t.enabled, t.server_id
+             FROM mcp_tools t JOIN mcp_servers s ON s.id = t.server_id
+             WHERE s.user_id = $1 AND s.enabled AND t.enabled AND t.present
+             ORDER BY s.name, t.name",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn mcp_tool(&self, user_id: i64, name: &str) -> Result<Option<ToolRow>> {
+        Ok(sqlx::query_as(
+            "SELECT t.name, t.description, t.input_schema, t.annotations, t.effect, t.enabled, t.server_id
+             FROM mcp_tools t JOIN mcp_servers s ON s.id = t.server_id
+             WHERE s.user_id = $1 AND s.enabled AND t.present AND t.name = $2
+             LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn native_policy(&self, user_id: i64, name: &str) -> Result<Option<(String, bool)>> {
+        let row: Option<(String, bool)> = sqlx::query_as(
+            "SELECT effect, enabled FROM native_tool_policies WHERE user_id = $1 AND name = $2",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+}
+
+fn prompt_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    for raw in text.split(|c: char| !c.is_alphanumeric()) {
+        let word = raw.to_lowercase();
+        if word.chars().count() > 3 && !words.contains(&word) {
+            words.push(word);
+        }
+        if words.len() == 8 {
+            break;
+        }
+    }
+    words
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct PendingRun {
+    pub id: Uuid,
+    pub pending_tools: Value,
+    pub started_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct McpServer {
+    pub id: Uuid,
+    pub user_id: i64,
+    pub name: String,
+    pub transport: String,
+    pub url: String,
+    pub enabled: bool,
+    pub auth_type: String,
+    pub secret_enc: String,
+    pub oauth_enc: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct ToolRow {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub annotations: Value,
+    pub effect: Option<String>,
+    pub enabled: bool,
+    pub server_id: Uuid,
 }
 
 /// `hashApiKey` of @veit/api-keys: sha256 of `${pepper}:${key}` as hex.

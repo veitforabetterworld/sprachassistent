@@ -1,10 +1,10 @@
 import express from "express";
 import helmet from "helmet";
-import { adminExists, apiKeys, auth, ensureAccountSecrets } from "./accounts.js";
+import { apiKeys, auth, ensureAccountSecrets } from "./accounts.js";
 import { adminRouter } from "./admin.js";
 import { ensureSchema, pool } from "./db.js";
 import { env } from "./env.js";
-import { getSetting } from "./settings.js";
+import { migratePlaintextSecrets } from "./settings.js";
 
 /**
  * Web API of the admin area. nginx sends /v1/talk and /v1/health to the Rust voice server and everything else
@@ -13,6 +13,7 @@ import { getSetting } from "./settings.js";
 
 await ensureSchema();
 await ensureAccountSecrets();
+await migratePlaintextSecrets();
 
 const app = express();
 app.set("trust proxy", "loopback");
@@ -20,22 +21,6 @@ app.use(helmet());
 app.use(express.json({ limit: "1mb" }));
 app.use(auth.attachUser);
 
-// Only the very first account (the admin) may register, unless the admin area opens registration.
-app.post("/v1/auth/register", async (_req, res, next) => {
-  try {
-    if ((await adminExists()) && (await getSetting("registration_open")) !== "1") {
-      res.status(403).json({ error: "auth.registration_closed", message: "Registrierung ist geschlossen" });
-      return;
-    }
-    next();
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.get("/v1/setup", async (_req, res) => {
-  res.json({ admin_exists: await adminExists(), registration_open: (await getSetting("registration_open")) === "1" });
-});
 app.use("/v1/admin", adminRouter());
 app.use("/v1", auth.router);
 app.use("/v1", apiKeys.router);

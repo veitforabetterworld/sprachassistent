@@ -20,9 +20,11 @@ use serde_json::json;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+use crate::agent::Channel;
 use crate::assistant::{Assistant, NOT_UNDERSTOOD};
 use crate::audio;
-use crate::llm::ChatMessage;
+use crate::llm::{ChatMessage, ToolDef};
+use crate::mcp;
 use crate::sentences::SentenceSplitter;
 use crate::speech::{clean_transcript, voice_label, SpeechToText, TextToSpeech, VoiceBank};
 use crate::store::Device;
@@ -46,7 +48,13 @@ pub fn router(state: AppState) -> Router {
         .route("/internal/voices", get(voices))
         .route("/internal/devices/{id}/chat", post(device_chat))
         .route("/internal/devices/{id}/speak", post(device_speak))
+        .route("/internal/transcribe", post(transcribe))
         .route("/internal/providers/{id}/test", post(provider_test))
+        .route(
+            "/internal/providers/{id}/tool-test",
+            post(provider_tool_test),
+        )
+        .route("/internal/mcp/{id}/discover", post(mcp_discover))
         .route_layer(middleware::from_fn(local_only));
     Router::new()
         .route("/v1/health", get(health))
@@ -82,13 +90,11 @@ async fn local_only(req: Request, next: Next) -> Response {
 }
 
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let store = &state.assistant.store;
     Json(json!({
         "status": "ok",
-        "db": store.ping().await,
+        "db": state.assistant.store.ping().await,
         "stt": state.stt.is_some(),
         "voices": state.voices.list(),
-        "providers": store.provider_names().await.unwrap_or_default(),
     }))
 }
 
@@ -224,7 +230,7 @@ async fn talk(
         return Ok(audio_response(tts, device.speed, sentences, wav, Some("")));
     }
     let speed = device.speed;
-    let sentences = Arc::clone(&state.assistant).reply_stream(device, text.clone());
+    let sentences = Arc::clone(&state.assistant).reply_stream(device, text.clone(), Channel::Voice);
     Ok(audio_response(tts, speed, sentences, wav, Some(&text)))
 }
 
@@ -250,15 +256,26 @@ async fn device_chat(
 ) -> ApiResult<Json<serde_json::Value>> {
     let device = device_or_404(&state, id).await?;
     let started = std::time::Instant::now();
-    let reply = Arc::clone(&state.assistant)
-        .reply(device, body.text.trim().to_string())
+    let turn = Arc::clone(&state.assistant)
+        .reply(device, body.text.trim().to_string(), Channel::Text)
         .await;
-    Ok(Json(
-        json!({ "reply": reply, "ms": started.elapsed().as_millis() as u64 }),
-    ))
+    Ok(Json(json!({
+        "reply": turn.reply,
+        "ms": started.elapsed().as_millis() as u64,
+        "run_id": turn.run_id,
+        "status": turn.status,
+    })))
 }
 
-/// Text in the device's voice as WAV (admin area).
+/// Browser recording as WAV in, recognized text out. Same recognizer the ESP uses on `/v1/talk`.
+async fn transcribe(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    let text = recognize(&state, &body, audio::STT_RATE).await?;
+    Ok(Json(json!({ "text": text })))
+}
+
 async fn device_speak(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -286,7 +303,7 @@ async fn provider_test(
     let provider = state
         .assistant
         .store
-        .provider(id)
+        .provider(id, &state.assistant.secrets)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Anbieter nicht gefunden".into()))?;
     let messages = [ChatMessage::new(
@@ -297,11 +314,56 @@ async fn provider_test(
     let result = state
         .assistant
         .llm
-        .complete(&[provider], &messages, false)
+        .complete(&[provider], &messages, &[], false, false)
         .await;
     let ms = started.elapsed().as_millis() as u64;
     Ok(Json(match result {
-        Ok(reply) => json!({ "ok": true, "reply": reply.trim(), "ms": ms }),
+        Ok(turn) => json!({ "ok": true, "reply": turn.content.trim(), "ms": ms }),
         Err(e) => json!({ "ok": false, "error": format!("{e:#}"), "ms": ms }),
     }))
+}
+
+/// Asks the provider to call one dummy tool. `called` is false when it answers in text instead.
+async fn provider_tool_test(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let provider = state
+        .assistant
+        .store
+        .provider(id, &state.assistant.secrets)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Anbieter nicht gefunden".into()))?;
+    let messages = [ChatMessage::new("user", "Rufe das Werkzeug ping auf.")];
+    let tools = [ToolDef {
+        name: "ping".into(),
+        description: "Antwortet mit pong.".into(),
+        parameters: json!({"type": "object", "properties": {}}),
+    }];
+    let started = std::time::Instant::now();
+    let result = state
+        .assistant
+        .llm
+        .complete(&[provider], &messages, &tools, false, true)
+        .await;
+    let ms = started.elapsed().as_millis() as u64;
+    Ok(Json(match result {
+        Ok(turn) => json!({
+            "ok": true,
+            "called": turn.tool_calls.iter().any(|call| call.name == "ping"),
+            "reply": turn.content.trim(),
+            "ms": ms,
+        }),
+        Err(e) => json!({ "ok": false, "error": format!("{e:#}"), "ms": ms }),
+    }))
+}
+
+async fn mcp_discover(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    match mcp::discover(&state.assistant.store, &state.assistant.secrets, id).await {
+        Ok(tools) => Ok(Json(json!({ "ok": true, "tools": tools }))),
+        Err(e) => Ok(Json(json!({ "ok": false, "error": format!("{e:#}") }))),
+    }
 }

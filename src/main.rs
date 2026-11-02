@@ -9,8 +9,10 @@ use sprachassistent::api::{self, AppState};
 use sprachassistent::assistant::Assistant;
 use sprachassistent::config::Config;
 use sprachassistent::llm::Llm;
+use sprachassistent::secrets::Secrets;
 use sprachassistent::speech::{SpeechToText, VoiceBank};
 use sprachassistent::store::Store;
+use sprachassistent::tools::LiveTools;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,10 +37,14 @@ async fn main() -> Result<()> {
     let voices = load_voices(&config, &settings);
     tracing::info!("Stimmen: {:?}", voices.list());
 
+    let secrets = Secrets::from_env();
+    let tools = Arc::new(LiveTools::new(store.clone(), secrets.clone())?);
     let state = AppState {
         assistant: Arc::new(Assistant {
             llm: Arc::new(Llm::new()?),
             store,
+            tools,
+            secrets,
         }),
         stt,
         voices,

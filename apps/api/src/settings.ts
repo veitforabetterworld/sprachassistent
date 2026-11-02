@@ -1,14 +1,17 @@
 import { randomBytes } from "node:crypto";
 import { pool } from "./db.js";
+import { credentialsEnabled, encrypt, openSecret, seal } from "./secrets.js";
 
 /** Generated once, used by the server only and never sent to the browser. */
 const SECRET_KEYS = ["api_key_pepper", "api_key_secret", "auth_mfa_key"] as const;
 /** Write-only in the admin area: GET says whether they are set, an empty value on PUT keeps them. */
-export const PASSWORD_SETTINGS = ["smtp_password"] as const;
+export const PASSWORD_SETTINGS = ["smtp_password", "google_oauth_client_secret"] as const;
 
 export async function getSetting(key: string): Promise<string | null> {
   const result = await pool.query<{ value: string }>(`SELECT value FROM app_settings WHERE key = $1`, [key]);
-  return result.rows[0]?.value ?? null;
+  const value = result.rows[0]?.value;
+  if (value == null) return null;
+  return openSecret(value);
 }
 
 export async function setSetting(key: string, value: string): Promise<void> {
@@ -46,6 +49,24 @@ export async function saveSettings(values: Record<string, string>): Promise<void
     const isPassword = (PASSWORD_SETTINGS as readonly string[]).includes(key);
     if (!isPassword && !(key in known)) continue;
     if (isPassword && value === "") continue;
-    await setSetting(key, value);
+    await setSetting(key, isPassword ? seal(value) : value);
+  }
+}
+
+/** Rewrites plaintext provider keys and password settings once CREDENTIALS_KEY is set. */
+export async function migratePlaintextSecrets(): Promise<void> {
+  if (!credentialsEnabled()) return;
+  const providers = await pool.query<{ id: string; api_key: string }>(
+    `SELECT id, api_key FROM llm_providers WHERE api_key <> '' AND api_key NOT LIKE 'enc1:%'`,
+  );
+  for (const row of providers.rows) {
+    await pool.query(`UPDATE llm_providers SET api_key = $2 WHERE id = $1`, [row.id, encrypt(row.api_key)]);
+  }
+  const settings = await pool.query<{ key: string; value: string }>(
+    `SELECT key, value FROM app_settings WHERE key = ANY($1) AND value <> '' AND value NOT LIKE 'enc1:%'`,
+    [PASSWORD_SETTINGS],
+  );
+  for (const row of settings.rows) {
+    await setSetting(row.key, encrypt(row.value));
   }
 }

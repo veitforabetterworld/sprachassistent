@@ -1,8 +1,14 @@
+pub mod agent;
 pub mod api;
 pub mod assistant;
 pub mod audio;
+pub mod authz;
 pub mod config;
 pub mod llm;
+pub mod mcp;
+pub mod runs;
+pub mod secrets;
 pub mod sentences;
 pub mod speech;
 pub mod store;
+pub mod tools;

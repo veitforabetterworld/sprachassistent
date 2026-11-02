@@ -228,14 +228,14 @@ static void playResponse() {
   hasCarry = false;
   if (chunked) {
     for (;;) {
-      if (!readLine(line, 30000)) break;
+      if (!readLine(line, 45000)) break;
       long size = strtol(line.c_str(), nullptr, 16);
       if (size <= 0) break;
-      if (pumpAudio(size, 30000) < (size_t)size) break;
+      if (pumpAudio(size, 45000) < (size_t)size) break;
       readLine(line, 5000);  // CRLF nach dem Chunk
     }
   } else {
-    pumpAudio(contentLength >= 0 ? contentLength : SIZE_MAX, 30000);
+    pumpAudio(contentLength >= 0 ? contentLength : SIZE_MAX, 45000);
   }
   i2s_zero_dma_buffer(AMP_PORT);
 }

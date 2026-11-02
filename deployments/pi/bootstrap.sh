@@ -51,6 +51,12 @@ fi
 if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='sprachassistent'" | grep -q 1; then
   sudo -u postgres createdb -O sprachassistent sprachassistent
 fi
+if ! grep -q '^CREDENTIALS_KEY=.\+' "$REPO/.env" 2>/dev/null; then
+  umask 077
+  echo "CREDENTIALS_KEY=$(openssl rand -hex 32)" >>"$REPO/.env"
+  umask 022
+  log "CREDENTIALS_KEY in .env ergänzt"
+fi
 
 log "Sprachmodelle"
 bash "$REPO/deployments/pi/download-models.sh"

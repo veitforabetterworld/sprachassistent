@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { ForgotPasswordForm, LoginForm, RegisterForm, ResetPasswordForm, VerifyEmailView, veitAuthErrorText, veitAuthT, veitFetchJson } from "@veit/react-auth";
+import { ForgotPasswordForm, LoginForm, RegisterForm, ResetPasswordForm, VerifyEmailView, veitAuthErrorText, veitAuthT } from "@veit/react-auth";
 import { VeitSettingsToggleRow } from "@veit/react-controls";
 import { authClient, useAccount, type AccountUser } from "../api";
 import { useI18n } from "../i18n/I18nProvider";
@@ -8,7 +8,7 @@ import { linkClass, LocaleSwitch } from "./Layout";
 
 /** Pages around the account forms of @veit/react-auth; texts come from the framework, links and brand from here. */
 
-const AFTER_LOGIN = "/admin";
+const AFTER_LOGIN = "/chatbots";
 
 function useAuthTexts() {
   const { locale } = useI18n();
@@ -38,21 +38,8 @@ function FooterLink({ to, label }: { to: string; label: string }) {
   );
 }
 
-/** Registration is only open for the first account (the admin) unless the admin area opens it. */
-function useRegistrationOpen(): boolean {
-  const [open, setOpen] = useState(false);
-  useEffect(() => {
-    veitFetchJson<{ admin_exists: boolean; registration_open: boolean }>("/v1/setup")
-      .then((s) => setOpen(!s.admin_exists || s.registration_open))
-      .catch(() => setOpen(false));
-  }, []);
-  return open;
-}
-
 export function LoginPage() {
   const { t, parseError } = useAuthTexts();
-  const { t: tr } = useI18n();
-  const registrationOpen = useRegistrationOpen();
   return (
     <LoginForm<AccountUser>
       t={t}
@@ -66,7 +53,7 @@ export function LoginPage() {
       renderFooter={() => (
         <>
           <FooterLink to="/passwort-vergessen" label={t("auth.forgot_password")} />
-          {registrationOpen && <FooterLink to="/registrieren" label={tr("registerFirstAdmin")} />}
+          <FooterLink to="/registrieren" label={t("auth.register")} />
         </>
       )}
     />

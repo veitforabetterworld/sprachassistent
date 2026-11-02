@@ -1,6 +1,7 @@
 //! API tests against a real Postgres (TEST_DATABASE_URL) with fake speech and language models.
 //! Without TEST_DATABASE_URL they are skipped.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -14,11 +15,15 @@ use tokio::sync::Semaphore;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use serde_json::{json, Value};
 use sprachassistent::api::{router, AppState};
 use sprachassistent::assistant::Assistant;
-use sprachassistent::llm::{ChatMessage, ChatModel, Provider, TokenStream};
+use sprachassistent::authz::Effect;
+use sprachassistent::llm::{ChatMessage, ChatModel, ModelTurn, Provider, TokenStream, ToolCall};
+use sprachassistent::secrets::Secrets;
 use sprachassistent::speech::{SpeechToText, TextToSpeech, VoiceBank};
 use sprachassistent::store::{hash_api_key, Store};
+use sprachassistent::tools::{EmptyTools, ToolExecutor, ToolOffer};
 
 const PEPPER: &str = "test-pepper";
 const VOICE: &str = "vits-piper-de_DE-test-medium";
@@ -26,6 +31,7 @@ const VOICE: &str = "vits-piper-de_DE-test-medium";
 #[derive(Default)]
 struct FakeLlm {
     seen: Mutex<Vec<(Vec<String>, Vec<ChatMessage>)>>,
+    script: Mutex<VecDeque<ModelTurn>>,
 }
 
 #[async_trait]
@@ -43,8 +49,62 @@ impl ChatModel for FakeLlm {
         )))
     }
 
-    async fn complete(&self, _p: &[Provider], _m: &[ChatMessage], _json: bool) -> Result<String> {
-        Ok(r#"{"add": ["Heißt Veit"]}"#.into())
+    async fn complete(
+        &self,
+        providers: &[Provider],
+        messages: &[ChatMessage],
+        _tools: &[sprachassistent::llm::ToolDef],
+        _json: bool,
+        _force_tool: bool,
+    ) -> Result<ModelTurn> {
+        let names = providers.iter().map(|p| p.name.clone()).collect();
+        self.seen.lock().unwrap().push((names, messages.to_vec()));
+        let next = self.script.lock().unwrap().pop_front();
+        if let Some(mut turn) = next {
+            if turn.provider.is_empty() {
+                turn.provider = providers
+                    .first()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+            }
+            return Ok(turn);
+        }
+        Ok(ModelTurn {
+            content: r#"{"add": ["Heißt Veit"]}"#.into(),
+            provider: providers
+                .first()
+                .map(|p| p.name.clone())
+                .unwrap_or_default(),
+            ..ModelTurn::default()
+        })
+    }
+}
+
+impl FakeLlm {
+    fn push(&self, turn: ModelTurn) {
+        self.script.lock().unwrap().push_back(turn);
+    }
+}
+
+struct ScriptTools {
+    effect: Effect,
+    calls: Mutex<u32>,
+}
+
+#[async_trait]
+impl ToolExecutor for ScriptTools {
+    async fn list(&self, _user_id: i64) -> Result<Vec<ToolOffer>> {
+        Ok(vec![ToolOffer {
+            name: "echo".into(),
+            description: "Wiederholt einen Text.".into(),
+            parameters: json!({"type":"object","properties":{"text":{"type":"string"}}}),
+            effect: self.effect,
+        }])
+    }
+
+    async fn execute(&self, _user_id: i64, _name: &str, _args: Value) -> Result<String> {
+        *self.calls.lock().unwrap() += 1;
+        Ok("pong".into())
     }
 }
 
@@ -138,6 +198,8 @@ async fn setup() -> Option<Setup> {
         assistant: Arc::new(Assistant {
             llm: llm.clone(),
             store: store.clone(),
+            tools: Arc::new(EmptyTools),
+            secrets: Secrets::new(""),
         }),
         stt: Some(Arc::new(FakeStt)),
         voices: Arc::new(FakeVoices),
@@ -152,27 +214,32 @@ async fn setup() -> Option<Setup> {
 }
 
 impl Setup {
-    async fn device(&self, persona: &str) -> Uuid {
+    async fn user(&self, admin: bool) -> i64 {
+        let (id,): (i64,) = sqlx::query_as("INSERT INTO users (is_admin) VALUES ($1) RETURNING id")
+            .bind(admin)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap();
+        id
+    }
+
+    async fn device(&self, user: i64, persona: &str) -> Uuid {
         let (id,): (Uuid,) = sqlx::query_as(
-            "INSERT INTO devices (name, voice, persona, memory_extraction) VALUES ($1, $2, $3, false) RETURNING id",
+            "INSERT INTO devices (name, voice, persona, memory_extraction, user_id)
+             VALUES ($1, $2, $3, false, $4) RETURNING id",
         )
         .bind(format!("Test {}", Uuid::new_v4()))
         .bind(VOICE)
         .bind(persona)
+        .bind(user)
         .fetch_one(&self.pool)
         .await
         .unwrap();
         id
     }
 
-    /// An ESP key for `devices` (empty = all) of a new user.
-    async fn key(&self, admin: bool, devices: &[Uuid]) -> String {
-        let (user,): (i64,) =
-            sqlx::query_as("INSERT INTO users (is_admin) VALUES ($1) RETURNING id")
-                .bind(admin)
-                .fetch_one(&self.pool)
-                .await
-                .unwrap();
+    /// An ESP key for `devices` (empty = all of this user).
+    async fn key(&self, user: i64, devices: &[Uuid]) -> String {
         let key = format!("spa_{}", Uuid::new_v4().simple());
         sqlx::query(
             "INSERT INTO user_api_keys (user_id, key_hash, permissions, all_resources, resources)
@@ -221,23 +288,26 @@ fn tone() -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn talk_needs_an_admin_key_for_the_device() {
+async fn talk_needs_the_owners_key() {
     let Some(s) = setup().await else { return };
-    let (a, b) = (s.device("").await, s.device("").await);
+    let owner = s.user(false).await;
+    let stranger = s.user(false).await;
+    let (a, b) = (s.device(owner, "").await, s.device(owner, "").await);
     let no_key = Request::post("/v1/talk").body(Body::from(tone())).unwrap();
     assert_eq!(s.send(no_key).await.0, StatusCode::UNAUTHORIZED);
-    let not_admin = s.key(false, &[a]).await;
+    let foreign = s.key(stranger, &[a]).await;
     assert_eq!(
-        s.send(talk(&not_admin, "", tone())).await.0,
+        s.send(talk(&foreign, "", tone())).await.0,
         StatusCode::UNAUTHORIZED
     );
-    let only_a = s.key(true, &[a]).await;
+    let only_a = s.key(owner, &[a]).await;
     let other = format!("?device={b}");
     assert_eq!(
         s.send(talk(&only_a, &other, tone())).await.0,
         StatusCode::UNAUTHORIZED
     );
-    let both = s.key(true, &[a, b]).await;
+    assert_eq!(s.send(talk(&only_a, "", tone())).await.0, StatusCode::OK);
+    let both = s.key(owner, &[a, b]).await;
     assert_eq!(
         s.send(talk(&both, "", tone())).await.0,
         StatusCode::UNAUTHORIZED
@@ -248,8 +318,9 @@ async fn talk_needs_an_admin_key_for_the_device() {
 #[tokio::test]
 async fn talk_streams_speech_and_remembers_per_device() {
     let Some(s) = setup().await else { return };
-    let (a, b) = (s.device("").await, s.device("").await);
-    let key = s.key(true, &[a]).await;
+    let owner = s.user(false).await;
+    let (a, b) = (s.device(owner, "").await, s.device(owner, "").await);
+    let key = s.key(owner, &[a]).await;
     let (status, headers, body) = s.send(talk(&key, "", tone())).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["x-sample-rate"], "22050");
@@ -267,13 +338,16 @@ async fn talk_streams_speech_and_remembers_per_device() {
         "Hallo Veit, schön dich zu hören. Wie geht's?"
     );
     assert!(s.store.recent_messages(b, 10).await.unwrap().is_empty());
+    let seen = s.llm.seen.lock().unwrap();
+    assert!(seen.last().unwrap().1[0].content.contains("Lautsprecher"));
 }
 
 #[tokio::test]
 async fn silence_is_answered_without_asking_the_model() {
     let Some(s) = setup().await else { return };
-    let device = s.device("").await;
-    let key = s.key(true, &[device]).await;
+    let owner = s.user(false).await;
+    let device = s.device(owner, "").await;
+    let key = s.key(owner, &[device]).await;
     let (status, headers, body) = s.send(talk(&key, "?format=wav", vec![0u8; 32_000])).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["content-type"], "audio/wav");
@@ -284,8 +358,9 @@ async fn silence_is_answered_without_asking_the_model() {
 #[tokio::test]
 async fn prompt_has_the_device_persona_facts_history_and_provider_order() {
     let Some(s) = setup().await else { return };
-    let device = s.device("Du bist Frieda, eine Piratin.").await;
-    let other = s.device("").await;
+    let owner = s.user(false).await;
+    let device = s.device(owner, "Du bist Frieda, eine Piratin.").await;
+    let other = s.device(s.user(false).await, "").await;
     sqlx::query("INSERT INTO device_facts (device_id, content) VALUES ($1, 'Mag Kaffee'), ($2, 'Fremder Fakt')")
         .bind(device)
         .bind(other)
@@ -297,11 +372,22 @@ async fn prompt_has_the_device_persona_facts_history_and_provider_order() {
         .await
         .unwrap();
     let (local,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO llm_providers (name, base_url, model, priority) VALUES ($1, 'http://127.0.0.1:11434/v1', 'x', 999)
+        "INSERT INTO llm_providers (user_id, name, base_url, model, priority)
+         VALUES ($1, $2, 'http://127.0.0.1:11434/v1', 'x', 999)
          RETURNING id",
     )
+    .bind(owner)
     .bind(format!("Lokal {device}"))
     .fetch_one(&s.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO llm_providers (user_id, name, base_url, model, priority)
+         VALUES ($1, $2, 'http://127.0.0.1:11434/v1', 'x', 1)",
+    )
+    .bind(s.user(false).await)
+    .bind(format!("Fremd {device}"))
+    .execute(&s.pool)
     .await
     .unwrap();
     sqlx::query("UPDATE devices SET provider_id = $2 WHERE id = $1")
@@ -326,12 +412,14 @@ async fn prompt_has_the_device_persona_facts_history_and_provider_order() {
     let seen = s.llm.seen.lock().unwrap();
     let (providers, messages) = seen.last().unwrap();
     assert_eq!(providers[0], format!("Lokal {device}"));
+    assert!(!providers.iter().any(|name| name.starts_with("Fremd ")));
     let system = &messages[0].content;
     assert!(system.starts_with("Du bist Frieda, eine Piratin."));
     assert!(system.contains("- Mag Kaffee"));
     assert!(!system.contains("Fremder Fakt"));
     assert_eq!(messages[1].content, "Vorher gesagt");
     assert_eq!(messages.last().unwrap().content, "Hallo");
+    assert!(!system.contains("Lautsprecher"));
 }
 
 #[tokio::test]
@@ -358,15 +446,283 @@ async fn internal_routes_are_not_reachable_through_nginx() {
 #[tokio::test]
 async fn extracted_facts_are_stored_for_the_device() {
     let Some(s) = setup().await else { return };
-    let id = s.device("").await;
+    let id = s.device(s.user(false).await, "").await;
     let device = s.store.device(id).await.unwrap().unwrap();
-    let assistant = Assistant {
-        llm: s.llm.clone(),
-        store: s.store.clone(),
-    };
-    assistant
-        .extract_facts(&device, "Ich heiße Veit", "Freut mich")
+    sqlx::query(
+        "INSERT INTO device_facts (device_id, content, origin) VALUES ($1, 'Mag Tee', 'user')",
+    )
+    .bind(id)
+    .execute(&s.pool)
+    .await
+    .unwrap();
+    let llm: Arc<dyn ChatModel> = s.llm.clone();
+    sprachassistent::assistant::extract_facts(
+        &llm,
+        &s.store,
+        &device,
+        "Ich heiße Veit",
+        "Freut mich",
+    )
+    .await
+    .unwrap();
+    let facts = s.store.facts(id).await.unwrap();
+    assert!(facts.iter().any(|f| f.content == "Heißt Veit"));
+    assert!(facts
+        .iter()
+        .any(|f| f.content == "Mag Tee" && f.origin == "user"));
+}
+
+fn tool_turn(call: bool, text: &str) -> ModelTurn {
+    if call {
+        ModelTurn {
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: "echo".into(),
+                arguments: "{}".into(),
+            }],
+            ..ModelTurn::default()
+        }
+    } else {
+        ModelTurn {
+            content: text.into(),
+            ..ModelTurn::default()
+        }
+    }
+}
+
+async fn tool_setup(effect: Effect) -> Option<(Setup, Arc<ScriptTools>, Uuid, String)> {
+    let s = setup().await?;
+    let owner = s.user(false).await;
+    let device = s.device(owner, "Du bist Kurt.").await;
+    let name = format!("Tools {device}");
+    let (provider,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO llm_providers (user_id, name, base_url, model, priority, supports_tools)
+         VALUES ($1, $2, 'http://127.0.0.1:11434/v1', 'x', 1, true) RETURNING id",
+    )
+    .bind(owner)
+    .bind(&name)
+    .fetch_one(&s.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE devices SET provider_id = $2 WHERE id = $1")
+        .bind(device)
+        .bind(provider)
+        .execute(&s.pool)
         .await
         .unwrap();
-    assert_eq!(s.store.facts(id).await.unwrap()[0].content, "Heißt Veit");
+    let tools = Arc::new(ScriptTools {
+        effect,
+        calls: Mutex::new(0),
+    });
+    let llm = Arc::new(FakeLlm::default());
+    let app = router(AppState {
+        assistant: Arc::new(Assistant {
+            llm: llm.clone(),
+            store: s.store.clone(),
+            tools: tools.clone(),
+            secrets: Secrets::new(""),
+        }),
+        stt: Some(Arc::new(FakeStt)),
+        voices: Arc::new(FakeVoices),
+        stt_slot: Arc::new(Semaphore::new(1)),
+    });
+    let key = s.key(owner, &[device]).await;
+    Some((
+        Setup {
+            app,
+            llm,
+            store: s.store,
+            pool: s.pool,
+        },
+        tools,
+        device,
+        key,
+    ))
+}
+
+async fn chat(s: &Setup, device: Uuid, text: &str) -> Value {
+    let req = Request::post(format!("/internal/devices/{device}/chat"))
+        .header("content-type", "application/json")
+        .body(Body::from(format!(r#"{{"text":"{text}"}}"#)))
+        .unwrap();
+    let (status, _, body) = s.send(req).await;
+    assert_eq!(status, StatusCode::OK);
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn tool_call_speaks_the_busy_line_before_the_answer() {
+    let Some((s, tools, device, key)) = tool_setup(Effect::Auto).await else {
+        return;
+    };
+    s.llm.push(tool_turn(true, ""));
+    s.llm.push(tool_turn(false, "Erledigt."));
+    let (status, _, body) = s.send(talk(&key, "", tone())).await;
+    assert_eq!(status, StatusCode::OK);
+    let busy = "Einen Moment.".chars().count();
+    let answer = "Erledigt.".chars().count();
+    assert_eq!(body.len(), (busy + answer) * 2);
+    assert_eq!(*tools.calls.lock().unwrap(), 1);
+    let seen = s.llm.seen.lock().unwrap();
+    let second = &seen[1].1;
+    assert!(second
+        .iter()
+        .any(|m| m.role == "tool" && m.content.contains("pong")));
+    assert!(second.iter().any(|m| m.content.contains("tool_result")));
+    let _ = device;
+}
+
+#[tokio::test]
+async fn confirmation_runs_only_after_yes() {
+    let Some((s, tools, device, _)) = tool_setup(Effect::Confirm).await else {
+        return;
+    };
+    s.llm.push(tool_turn(true, ""));
+    let first = chat(&s, device, "Mach das").await;
+    assert_eq!(first["status"], "waiting_for_approval");
+    assert!(first["reply"].as_str().unwrap().contains("ja oder nein"));
+    assert_eq!(*tools.calls.lock().unwrap(), 0);
+
+    s.llm.push(tool_turn(false, "Gemacht."));
+    let yes = chat(&s, device, "ja").await;
+    assert_eq!(yes["reply"], "Gemacht.");
+    assert_eq!(yes["status"], "completed");
+    assert_eq!(*tools.calls.lock().unwrap(), 1);
+    let framed = s.llm.seen.lock().unwrap().last().unwrap().1.clone();
+    assert!(framed
+        .iter()
+        .any(|m| m.role == "tool" && m.content.contains("[tool_result")));
+}
+
+#[tokio::test]
+async fn confirmation_no_and_other_do_not_run_the_tool() {
+    let Some((s, tools, device, _)) = tool_setup(Effect::Confirm).await else {
+        return;
+    };
+    s.llm.push(tool_turn(true, ""));
+    chat(&s, device, "Mach das").await;
+    s.llm.push(tool_turn(false, "Alles klar."));
+    let no = chat(&s, device, "nein").await;
+    assert_eq!(no["reply"], "Alles klar.");
+    assert_eq!(*tools.calls.lock().unwrap(), 0);
+    assert!(s
+        .llm
+        .seen
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .1
+        .iter()
+        .any(|m| m.content.contains("abgelehnt")));
+
+    s.llm.push(tool_turn(true, ""));
+    chat(&s, device, "Noch einmal").await;
+    s.llm.push(tool_turn(false, "Neue Frage."));
+    let other = chat(&s, device, "Was gibt es zu essen").await;
+    assert_eq!(other["reply"], "Neue Frage.");
+    assert_eq!(*tools.calls.lock().unwrap(), 0);
+    let waiting: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_runs WHERE device_id = $1 AND status = 'waiting_for_approval'",
+    )
+    .bind(device)
+    .fetch_one(&s.pool)
+    .await
+    .unwrap();
+    assert_eq!(waiting, 0);
+}
+
+#[tokio::test]
+async fn denied_tool_is_not_executed() {
+    let Some((s, tools, device, _)) = tool_setup(Effect::Deny).await else {
+        return;
+    };
+    s.llm.push(tool_turn(true, ""));
+    s.llm.push(tool_turn(false, "Geht nicht."));
+    let reply = chat(&s, device, "Lösch das").await;
+    assert_eq!(reply["reply"], "Geht nicht.");
+    assert_eq!(*tools.calls.lock().unwrap(), 0);
+    assert!(s
+        .llm
+        .seen
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .1
+        .iter()
+        .any(|m| m.content.contains("gesperrt")));
+}
+
+#[tokio::test]
+async fn iteration_limit_stops_the_loop() {
+    let Some((s, tools, device, _)) = tool_setup(Effect::Auto).await else {
+        return;
+    };
+    sqlx::query("UPDATE devices SET max_iterations = 1 WHERE id = $1")
+        .bind(device)
+        .execute(&s.pool)
+        .await
+        .unwrap();
+    s.llm.push(tool_turn(true, ""));
+    s.llm.push(tool_turn(false, "Sollte nicht drankommen."));
+    let reply = chat(&s, device, "Loop").await;
+    assert_eq!(reply["reply"], sprachassistent::agent::TOO_LONG);
+    assert_eq!(reply["status"], "failed");
+    assert_eq!(*tools.calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn a_run_stays_on_the_provider_that_answered() {
+    let Some((s, _, device, _)) = tool_setup(Effect::Auto).await else {
+        return;
+    };
+    let other = format!("Zweiter {device}");
+    sqlx::query(
+        "INSERT INTO llm_providers (user_id, name, base_url, model, priority, supports_tools)
+         SELECT user_id, $1, 'http://127.0.0.1:11434/v1', 'y', 2, true FROM devices WHERE id = $2",
+    )
+    .bind(&other)
+    .bind(device)
+    .execute(&s.pool)
+    .await
+    .unwrap();
+    s.llm.push(tool_turn(true, ""));
+    s.llm.push(tool_turn(false, "Fertig."));
+    let reply = chat(&s, device, "Such").await;
+    assert_eq!(reply["reply"], "Fertig.");
+    let seen = s.llm.seen.lock().unwrap();
+    let first = &seen[0].0;
+    assert!(first.len() >= 2, "{first:?}");
+    assert_eq!(seen[1].0, vec![first[0].clone()]);
+}
+
+#[tokio::test]
+async fn prompt_keeps_recent_facts_and_keyword_matches() {
+    let Some(s) = setup().await else { return };
+    let device = s.device(s.user(false).await, "").await;
+    sqlx::query(
+        "INSERT INTO device_facts (device_id, content, updated_at)
+         VALUES ($1, 'Handwerker Heinz', NOW() - INTERVAL '10 days')",
+    )
+    .bind(device)
+    .execute(&s.pool)
+    .await
+    .unwrap();
+    for i in 0..30 {
+        sqlx::query("INSERT INTO device_facts (device_id, content) VALUES ($1, $2)")
+            .bind(device)
+            .bind(format!("Neuer Fakt {i}"))
+            .execute(&s.pool)
+            .await
+            .unwrap();
+    }
+    let facts = s
+        .store
+        .facts_for_prompt(device, "wie heißt der Handwerker")
+        .await
+        .unwrap();
+    assert!(facts.len() <= 40);
+    assert!(facts.iter().any(|f| f.content == "Handwerker Heinz"));
+    assert!(facts.iter().any(|f| f.content == "Neuer Fakt 29"));
 }

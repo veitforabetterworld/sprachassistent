@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronRight, Loader2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
+import { ChevronRight, GripVertical, Loader2 } from "lucide-react";
 import {
   VeitButton,
   VeitField,
@@ -13,6 +13,7 @@ import {
   VeitStatusBadge,
 } from "@veit/react-controls";
 import { VeitOverlayEditDialog, useDialogFormBaseline, useManagedOverlayDialogBinding } from "@veit/react-dialog";
+import { VeitSortableActivatorRow, VeitSortableVerticalList } from "@veit/react-dnd";
 import { adminApi, errorText, type Provider, type ProviderInput } from "../../api";
 import type { MessageKey } from "../../i18n/de";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -26,6 +27,7 @@ const PRESETS: Record<string, ProviderInput & { keyUrl?: string; nameKey?: Messa
     model: "qwen/qwen3.8-27b",
     api_key: "",
     enabled: true,
+    supports_tools: false,
     priority: 10,
     keyUrl: "https://console.groq.com/keys",
   },
@@ -35,6 +37,7 @@ const PRESETS: Record<string, ProviderInput & { keyUrl?: string; nameKey?: Messa
     model: "gemini-2.5-flash-lite",
     api_key: "",
     enabled: true,
+    supports_tools: false,
     priority: 20,
     keyUrl: "https://aistudio.google.com/apikey",
   },
@@ -44,6 +47,7 @@ const PRESETS: Record<string, ProviderInput & { keyUrl?: string; nameKey?: Messa
     model: "meta-llama/llama-3.3-70b-instruct:free",
     api_key: "",
     enabled: true,
+    supports_tools: false,
     priority: 30,
     keyUrl: "https://openrouter.ai/keys",
   },
@@ -54,6 +58,7 @@ const PRESETS: Record<string, ProviderInput & { keyUrl?: string; nameKey?: Messa
     model: "qwen2.5:3b",
     api_key: "",
     enabled: true,
+    supports_tools: false,
     priority: 40,
   },
 };
@@ -66,22 +71,25 @@ const KEY_URLS: Record<string, string> = Object.fromEntries(
 
 const isLocal = (url: string) => /^https?:\/\/(localhost|127\.0\.0\.1)[:/]/.test(url);
 
-type Draft = Omit<ProviderInput, "priority"> & { priority: string };
+type Draft = Omit<ProviderInput, "priority">;
 
 function toDraft(p: ProviderInput): Draft {
-  const { name, base_url, model, api_key, enabled, priority } = p;
-  return { name, base_url, model, api_key, enabled, priority: String(priority) };
+  const { name, base_url, model, api_key, enabled, supports_tools } = p;
+  return { name, base_url, model, api_key, enabled, supports_tools };
 }
 
 function ProviderEditDialog({
   open,
   provider,
+  nextPriority,
   onClose,
   onSaved,
 }: {
   open: boolean;
   /** null creates a provider. */
   provider: Provider | null;
+  /** Priority for a new provider, after the current last one. */
+  nextPriority: number;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -108,13 +116,21 @@ function ProviderEditDialog({
   const keyUrl = KEY_URLS[draft.base_url];
   const ready = provider !== null && provider.enabled && (provider.api_key_set || isLocal(provider.base_url));
 
-  const test = async () => {
+  const test = async (tools: boolean) => {
     if (!provider) return;
     setTesting(true);
     setTestResult(null);
     try {
-      const r = await adminApi.testProvider(provider.id);
-      setTestResult(r.ok ? { ok: true, text: tf("testReply", { reply: r.reply ?? "", ms: r.ms }) } : { ok: false, text: r.error ?? t("error") });
+      const r = tools ? await adminApi.testProviderTools(provider.id) : await adminApi.testProvider(provider.id);
+      const called = "called" in r && r.called;
+      const text = !r.ok
+        ? (r.error ?? t("error"))
+        : tools
+          ? called
+            ? tf("testToolsReply", { ms: r.ms })
+            : tf("testToolsText", { reply: r.reply ?? "" })
+          : tf("testReply", { reply: r.reply ?? "", ms: r.ms });
+      setTestResult({ ok: r.ok, text });
     } catch (e) {
       setTestResult({ ok: false, text: errorText(e) });
     } finally {
@@ -123,7 +139,7 @@ function ProviderEditDialog({
   };
 
   const save = async () => {
-    const input: ProviderInput = { ...draft, priority: Number(draft.priority) || 0 };
+    const input: ProviderInput = { ...draft, priority: provider ? provider.priority : nextPriority };
     setSaving(true);
     try {
       if (provider) await adminApi.updateProvider(provider.id, input);
@@ -222,17 +238,27 @@ function ProviderEditDialog({
             disabled={saving}
           />
         </VeitField>
-        <VeitField label={t("priority")} htmlFor="provider-priority">
-          <VeitInput id="provider-priority" inputMode="numeric" value={draft.priority} disabled={saving} onChange={(e) => set("priority", e.target.value)} />
-        </VeitField>
         <VeitSettingsToggleRow variant="embed" label={t("enabled")} checked={draft.enabled} disabled={saving} onCheckedChange={(v) => set("enabled", v)} />
+        <VeitSettingsToggleRow
+          variant="embed"
+          label={t("supportsTools")}
+          description={t("supportsToolsHint")}
+          checked={draft.supports_tools}
+          disabled={saving}
+          onCheckedChange={(v) => set("supports_tools", v)}
+        />
         {provider && (
           <VeitField label={t("connection")} hint={dirty ? t("connectionHint") : undefined}>
             <div className="flex flex-col items-start gap-2">
-              <VeitButton variant="secondary" disabled={saving || testing || !ready} onClick={() => void test()}>
-                {testing && <Loader2 className="size-4 animate-spin" aria-hidden />}
-                {t("test")}
-              </VeitButton>
+              <div className="flex flex-wrap gap-2">
+                <VeitButton variant="secondary" disabled={saving || testing || !ready} onClick={() => void test(false)}>
+                  {testing && <Loader2 className="size-4 animate-spin" aria-hidden />}
+                  {t("test")}
+                </VeitButton>
+                <VeitButton variant="secondary" disabled={saving || testing || !ready} onClick={() => void test(true)}>
+                  {t("testTools")}
+                </VeitButton>
+              </div>
               {testResult && (
                 <VeitStatusBadge variant={testResult.ok ? "success" : "destructive"} shape="rounded">
                   {testResult.text}
@@ -251,28 +277,48 @@ function ProviderEditDialog({
   );
 }
 
-/** A provider; a click opens the dialog to show, test, edit and delete it. */
-function ProviderRow({ provider, onClick }: { provider: Provider; onClick: () => void }) {
+/** A provider; the grip changes the order, a click opens the dialog. */
+function ProviderRow({ provider, dragDisabled, onClick }: { provider: Provider; dragDisabled: boolean; onClick: () => void }) {
   const { t, tf } = useI18n();
   const ready = provider.enabled && (provider.api_key_set || isLocal(provider.base_url));
   return (
-    <VeitListItem
-      title={provider.name}
-      meta={tf("providerMeta", { model: provider.model, priority: provider.priority })}
-      badge={
-        <VeitStatusBadge variant={!provider.enabled ? "inactive" : ready ? "success" : "warning"}>
-          {!provider.enabled
-            ? t("providerOff")
-            : provider.api_key_set
-              ? tf("providerKey", { hint: provider.api_key_hint })
-              : isLocal(provider.base_url)
-                ? t("providerLocal")
-                : t("providerKeyMissing")}
-        </VeitStatusBadge>
-      }
-      trailing={<ChevronRight className="size-4 text-muted-foreground" aria-hidden />}
-      onClick={onClick}
-    />
+    <VeitSortableActivatorRow
+      id={provider.id}
+      disabled={dragDisabled}
+      draggingOpacity={0.45}
+      renderActivator={({ setActivatorNodeRef, listeners }) => (
+        <VeitButton
+          type="button"
+          variant="secondary"
+          className="cursor-grab touch-manipulation active:cursor-grabbing"
+          aria-label={t("dragProvider")}
+          disabled={dragDisabled}
+          ref={setActivatorNodeRef}
+          {...(listeners as ComponentProps<typeof VeitButton>)}
+        >
+          <GripVertical className="size-4" aria-hidden />
+        </VeitButton>
+      )}
+    >
+      <VeitListItem
+        as="div"
+        title={provider.name}
+        meta={tf("providerMeta", { model: provider.model })}
+        badge={
+          <VeitStatusBadge variant={!provider.enabled ? "inactive" : ready ? "success" : "warning"}>
+            {!provider.enabled
+              ? t("providerOff")
+              : provider.api_key_set
+                ? tf("providerKey", { hint: provider.api_key_hint })
+                : isLocal(provider.base_url)
+                  ? t("providerLocal")
+                  : t("providerKeyMissing")}
+          </VeitStatusBadge>
+        }
+        trailing={<ChevronRight className="size-4 text-muted-foreground" aria-hidden />}
+        onClick={onClick}
+      />
+    </VeitSortableActivatorRow>
   );
 }
 
@@ -280,13 +326,54 @@ export function ProvidersPage() {
   const { t } = useI18n();
   const [providers, setProviders] = useState<Provider[] | null>(null);
   const [editing, setEditing] = useState<Provider | "new" | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const reload = useCallback(() => {
     void adminApi.providers().then(setProviders);
   }, []);
   useEffect(reload, [reload]);
 
+  const reorder = async (activeId: string, overId: string) => {
+    if (!providers || activeId === overId) return;
+    const from = providers.findIndex((provider) => provider.id === activeId);
+    const to = providers.findIndex((provider) => provider.id === overId);
+    if (from < 0 || to < 0) return;
+    const next = [...providers];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    const ranked = next.map((provider, index) => ({ ...provider, priority: (index + 1) * 10 }));
+    const previous = providers;
+    setProviders(ranked);
+    try {
+      await Promise.all(
+        ranked
+          .filter((provider) => previous.find((item) => item.id === provider.id)?.priority !== provider.priority)
+          .map((provider) =>
+            adminApi.updateProvider(provider.id, {
+              name: provider.name,
+              base_url: provider.base_url,
+              model: provider.model,
+              api_key: "",
+              enabled: provider.enabled,
+              supports_tools: provider.supports_tools,
+              priority: provider.priority,
+            }),
+          ),
+      );
+    } catch (error) {
+      setProviders(previous);
+      setNotice(errorText(error));
+    }
+  };
+
+  const nextPriority = (providers?.reduce((max, provider) => Math.max(max, provider.priority), 0) ?? 0) + 10;
+
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4 sm:p-6">
+      {notice && (
+        <VeitStatusBadge variant="destructive" shape="rounded">
+          {notice}
+        </VeitStatusBadge>
+      )}
       <VeitSettingsSection
         title={t("providersTitle")}
         description={t("providersHint")}
@@ -296,13 +383,30 @@ export function ProvidersPage() {
           </VeitButton>
         }
       >
-        <VeitList>
-          {providers?.map((p) => <ProviderRow key={p.id} provider={p} onClick={() => setEditing(p)} />)}
-        </VeitList>
+        <VeitSortableVerticalList
+          sortableIds={providers?.map((provider) => provider.id) ?? []}
+          onDragEnd={(event) => {
+            if (!event.over) return;
+            void reorder(String(event.active.id), String(event.over.id));
+          }}
+          sortableChildren={
+            <VeitList>
+              {providers?.map((provider) => (
+                <ProviderRow
+                  key={provider.id}
+                  provider={provider}
+                  dragDisabled={(providers?.length ?? 0) < 2}
+                  onClick={() => setEditing(provider)}
+                />
+              ))}
+            </VeitList>
+          }
+        />
       </VeitSettingsSection>
       <ProviderEditDialog
         open={editing !== null}
         provider={editing === "new" ? null : editing}
+        nextPriority={nextPriority}
         onClose={() => setEditing(null)}
         onSaved={() => {
           setEditing(null);
