@@ -51,6 +51,10 @@ const providerSchema = z.object({
   priority: z.coerce.number().int().default(0),
 });
 
+const providerDraftSchema = providerSchema.pick({ name: true, base_url: true, api_key: true, model: true }).extend({
+  id: uuid.nullable().default(null),
+});
+
 const deviceSchema = z.object({
   name: z.string().trim().min(1).max(80),
   voice: z.string().trim().min(1),
@@ -235,20 +239,20 @@ export function adminRouter(): Router {
       res.set("Cache-Control", "no-store").json({ key });
     }),
   );
-  router.post(
-    "/providers/:id/test",
-    handle(async (req, res) => {
-      const id = await ownedProvider(req, parse(uuid, req.params.id));
-      await toVoice(res, `/internal/providers/${id}/test`, { method: "POST", body: {} });
-    }),
-  );
-  router.post(
-    "/providers/:id/tool-test",
-    handle(async (req, res) => {
-      const id = await ownedProvider(req, parse(uuid, req.params.id));
-      await toVoice(res, `/internal/providers/${id}/tool-test`, { method: "POST", body: {} });
-    }),
-  );
+  // Tests what the edit dialog shows, saved or not. An empty key uses the one stored under id.
+  for (const kind of ["test", "tool-test"]) {
+    router.post(
+      `/providers/${kind}`,
+      handle(async (req, res) => {
+        const draft = parse(providerDraftSchema, req.body);
+        const id = await ownedProvider(req, draft.id);
+        await toVoice(res, `/internal/providers/${kind}`, {
+          method: "POST",
+          body: { id, name: draft.name, base_url: draft.base_url, model: draft.model, api_key: draft.api_key },
+        });
+      }),
+    );
+  }
 
   router.get(
     "/provider-choices",

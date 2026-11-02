@@ -151,7 +151,6 @@ export const de = {
   hideKey: "Key verbergen",
   enabled: "Aktiv",
   connection: "Verbindung",
-  connectionHint: "Testet die gespeicherten Einstellungen; erst speichern, um Änderungen zu testen.",
   test: "Testen",
   testReply: "„{reply}“ in {ms} ms",
   testTools: "Werkzeug testen",

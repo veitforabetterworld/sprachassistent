@@ -110,14 +110,19 @@ function ProviderEditDialog({
   // The key stays empty unless a new one is typed; showing the stored one is not a change.
   const { dirty, formBaseline } = useDialogFormBaseline({ draft, resolveBaseline: () => initial, resetDeps: [open, initial], track: open });
   const keyUrl = KEY_URLS[draft.base_url];
-  const ready = provider !== null && provider.enabled && (provider.api_key_set || isLocal(provider.base_url));
+  // Tests run against the dialog's values, saved or not.
+  const ready =
+    draft.base_url.trim() !== "" &&
+    draft.model.trim() !== "" &&
+    (draft.api_key.trim() !== "" || (provider?.api_key_set ?? false) || isLocal(draft.base_url));
 
   const test = async (tools: boolean) => {
-    if (!provider) return;
+    const { name, base_url, model, api_key } = draft;
+    const probe = { id: provider?.id ?? null, name, base_url, model, api_key };
     setTesting(true);
     setTestResult(null);
     try {
-      const r = tools ? await adminApi.testProviderTools(provider.id) : await adminApi.testProvider(provider.id);
+      const r = tools ? await adminApi.testProviderTools(probe) : await adminApi.testProvider(probe);
       const called = "called" in r && r.called;
       const text = !r.ok
         ? (r.error ?? t("error"))
@@ -235,26 +240,24 @@ function ProviderEditDialog({
           />
         </VeitField>
         <VeitSettingsToggleRow variant="embed" label={t("enabled")} checked={draft.enabled} disabled={saving} onCheckedChange={(v) => set("enabled", v)} />
-        {provider && (
-          <VeitField label={t("connection")} hint={dirty ? t("connectionHint") : undefined}>
-            <div className="flex flex-col items-start gap-2">
-              <div className="flex flex-wrap gap-2">
-                <VeitButton variant="secondary" disabled={saving || testing || !ready} onClick={() => void test(false)}>
-                  {testing && <Loader2 className="size-4 animate-spin" aria-hidden />}
-                  {t("test")}
-                </VeitButton>
-                <VeitButton variant="secondary" disabled={saving || testing || !ready} onClick={() => void test(true)}>
-                  {t("testTools")}
-                </VeitButton>
-              </div>
-              {testResult && (
-                <VeitStatusBadge variant={testResult.ok ? "success" : "destructive"} shape="rounded">
-                  {testResult.text}
-                </VeitStatusBadge>
-              )}
+        <VeitField label={t("connection")}>
+          <div className="flex flex-col items-start gap-2">
+            <div className="flex flex-wrap gap-2">
+              <VeitButton variant="secondary" disabled={saving || testing || !ready} onClick={() => void test(false)}>
+                {testing && <Loader2 className="size-4 animate-spin" aria-hidden />}
+                {t("test")}
+              </VeitButton>
+              <VeitButton variant="secondary" disabled={saving || testing || !ready} onClick={() => void test(true)}>
+                {t("testTools")}
+              </VeitButton>
             </div>
-          </VeitField>
-        )}
+            {testResult && (
+              <VeitStatusBadge variant={testResult.ok ? "success" : "destructive"} shape="rounded">
+                {testResult.text}
+              </VeitStatusBadge>
+            )}
+          </div>
+        </VeitField>
         {error && (
           <VeitStatusBadge variant="destructive" shape="rounded">
             {error}

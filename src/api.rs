@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::agent::Channel;
 use crate::assistant::{Assistant, NOT_UNDERSTOOD};
 use crate::audio;
-use crate::llm::{ChatMessage, ToolDef};
+use crate::llm::{ChatMessage, Provider, ToolDef};
 use crate::mcp;
 use crate::sentences::SentenceSplitter;
 use crate::speech::{clean_transcript, voice_label, SpeechToText, TextToSpeech, VoiceBank};
@@ -49,11 +49,8 @@ pub fn router(state: AppState) -> Router {
         .route("/internal/devices/{id}/chat", post(device_chat))
         .route("/internal/devices/{id}/speak", post(device_speak))
         .route("/internal/transcribe", post(transcribe))
-        .route("/internal/providers/{id}/test", post(provider_test))
-        .route(
-            "/internal/providers/{id}/tool-test",
-            post(provider_tool_test),
-        )
+        .route("/internal/providers/test", post(provider_test))
+        .route("/internal/providers/tool-test", post(provider_tool_test))
         .route("/internal/mcp/{id}/discover", post(mcp_discover))
         .route_layer(middleware::from_fn(local_only));
     Router::new()
@@ -295,17 +292,43 @@ async fn device_speak(
     ))
 }
 
-/// One short request to a provider, to check key and model (admin area).
+/// What the edit dialog shows, saved or not. An empty `api_key` keeps the key stored under `id`.
+/// apps/api has checked that `id` belongs to the user.
+#[derive(Deserialize)]
+struct ProviderDraft {
+    id: Option<Uuid>,
+    name: String,
+    base_url: String,
+    model: String,
+    #[serde(default)]
+    api_key: String,
+}
+
+async fn draft_provider(state: &AppState, draft: ProviderDraft) -> ApiResult<Provider> {
+    let mut api_key = draft.api_key.trim().to_string();
+    if let (true, Some(id)) = (api_key.is_empty(), draft.id) {
+        api_key = state
+            .assistant
+            .store
+            .provider(id, &state.assistant.secrets)
+            .await?
+            .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Modell nicht gefunden".into()))?
+            .api_key;
+    }
+    Ok(Provider::new(
+        draft.name.trim(),
+        draft.base_url.trim(),
+        api_key,
+        draft.model.trim().to_string(),
+    ))
+}
+
+/// One short request to a provider, to check key and model before or after saving (admin area).
 async fn provider_test(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Json(draft): Json<ProviderDraft>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let provider = state
-        .assistant
-        .store
-        .provider(id, &state.assistant.secrets)
-        .await?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Modell nicht gefunden".into()))?;
+    let provider = draft_provider(&state, draft).await?;
     let messages = [ChatMessage::new(
         "user",
         "Antworte nur mit dem Wort: funktioniert",
@@ -326,14 +349,9 @@ async fn provider_test(
 /// Asks the provider to call one dummy tool. `called` is false when it answers in text instead.
 async fn provider_tool_test(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
+    Json(draft): Json<ProviderDraft>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let provider = state
-        .assistant
-        .store
-        .provider(id, &state.assistant.secrets)
-        .await?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Modell nicht gefunden".into()))?;
+    let provider = draft_provider(&state, draft).await?;
     let messages = [ChatMessage::new("user", "Rufe das Werkzeug ping auf.")];
     let tools = [ToolDef {
         name: "ping".into(),

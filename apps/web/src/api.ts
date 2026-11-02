@@ -51,6 +51,7 @@ export type Provider = {
   api_key_hint: string;
 };
 export type ProviderInput = Omit<Provider, "id" | "api_key_set" | "api_key_hint"> & { api_key: string };
+export type ProviderDraft = Pick<ProviderInput, "name" | "base_url" | "model" | "api_key"> & { id: string | null };
 
 export type Voice = { id: string; label: string };
 export type Fact = { id: string; content: string; origin: string; updated_at: string };
@@ -129,10 +130,11 @@ export const adminApi = {
   updateProvider: (id: string, input: ProviderInput) => admin<Provider>(`/providers/${id}`, "PUT", input),
   deleteProvider: (id: string) => admin<null>(`/providers/${id}`, "DELETE"),
   providerKey: async (id: string) => (await admin<{ key: string }>(`/providers/${id}/key`)).key,
-  testProvider: (id: string) =>
-    admin<{ ok: boolean; reply?: string; error?: string; ms: number }>(`/providers/${id}/test`, "POST", {}),
-  testProviderTools: (id: string) =>
-    admin<{ ok: boolean; called?: boolean; reply?: string; error?: string; ms: number }>(`/providers/${id}/tool-test`, "POST", {}),
+  /** Tests the dialog's values; an empty key uses the one stored under `id`. */
+  testProvider: (draft: ProviderDraft) =>
+    admin<{ ok: boolean; reply?: string; error?: string; ms: number }>("/providers/test", "POST", draft),
+  testProviderTools: (draft: ProviderDraft) =>
+    admin<{ ok: boolean; called?: boolean; reply?: string; error?: string; ms: number }>("/providers/tool-test", "POST", draft),
   providerChoices: async () => (await admin<{ providers: { id: string; name: string }[] }>("/provider-choices")).providers,
 
   devices: async () => (await admin<{ devices: Device[] }>("/devices")).devices,

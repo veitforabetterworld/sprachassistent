@@ -153,7 +153,6 @@ export const en: Record<MessageKey, string> = {
   hideKey: "Hide key",
   enabled: "Active",
   connection: "Connection",
-  connectionHint: "Tests the saved settings; save first to test changes.",
   test: "Test",
   testReply: "“{reply}” in {ms} ms",
   testTools: "Test tool",
