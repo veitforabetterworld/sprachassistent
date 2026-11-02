@@ -37,6 +37,17 @@ async fn main() -> Result<()> {
     .await?;
     let voices = load_voices(&config, &settings);
     tracing::info!("Stimmen: {:?}", voices.list());
+    // Loading a voice takes about 2 s on the Pi; the first answer after a restart should not wait.
+    if let Ok(used) = store.device_voices().await {
+        let voices = Arc::clone(&voices);
+        tokio::task::spawn_blocking(move || {
+            for id in used {
+                if let Err(e) = voices.voice(&id) {
+                    tracing::warn!("Stimme {id} nicht vorgeladen: {e:#}");
+                }
+            }
+        });
+    }
 
     let secrets = Secrets::from_env();
     let browser = Browser::start(Some(&config.browser_bin), &config.browser_user)

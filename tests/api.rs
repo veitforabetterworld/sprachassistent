@@ -31,6 +31,8 @@ const VOICE: &str = "vits-piper-de_DE-test-medium";
 #[derive(Default)]
 struct FakeLlm {
     seen: Mutex<Vec<(Vec<String>, Vec<ChatMessage>)>>,
+    /// Per `complete`: how many tools were offered and whether one was forced.
+    offered: Mutex<Vec<(usize, bool)>>,
     script: Mutex<VecDeque<ModelTurn>>,
 }
 
@@ -53,12 +55,13 @@ impl ChatModel for FakeLlm {
         &self,
         providers: &[Provider],
         messages: &[ChatMessage],
-        _tools: &[sprachassistent::llm::ToolDef],
+        tools: &[sprachassistent::llm::ToolDef],
         _json: bool,
-        _force_tool: bool,
+        force_tool: bool,
     ) -> Result<ModelTurn> {
         let names = providers.iter().map(|p| p.name.clone()).collect();
         self.seen.lock().unwrap().push((names, messages.to_vec()));
+        self.offered.lock().unwrap().push((tools.len(), force_tool));
         let next = self.script.lock().unwrap().pop_front();
         if let Some(mut turn) = next {
             if turn.provider.is_empty() {
@@ -87,6 +90,7 @@ impl FakeLlm {
 }
 
 struct ScriptTools {
+    name: &'static str,
     effect: Effect,
     calls: Mutex<u32>,
 }
@@ -95,7 +99,7 @@ struct ScriptTools {
 impl ToolExecutor for ScriptTools {
     async fn list(&self, _user_id: i64) -> Result<Vec<ToolOffer>> {
         Ok(vec![ToolOffer {
-            name: "echo".into(),
+            name: self.name.into(),
             description: "Wiederholt einen Text.".into(),
             parameters: json!({"type":"object","properties":{"text":{"type":"string"}}}),
             effect: self.effect,
@@ -492,6 +496,13 @@ fn tool_turn(call: bool, text: &str) -> ModelTurn {
 }
 
 async fn tool_setup(effect: Effect) -> Option<(Setup, Arc<ScriptTools>, Uuid, String)> {
+    named_tool_setup("echo", effect).await
+}
+
+async fn named_tool_setup(
+    tool: &'static str,
+    effect: Effect,
+) -> Option<(Setup, Arc<ScriptTools>, Uuid, String)> {
     let s = setup().await?;
     let owner = s.user(false).await;
     let device = s.device(owner, "Du bist Kurt.").await;
@@ -512,6 +523,7 @@ async fn tool_setup(effect: Effect) -> Option<(Setup, Arc<ScriptTools>, Uuid, St
         .await
         .unwrap();
     let tools = Arc::new(ScriptTools {
+        name: tool,
         effect,
         calls: Mutex::new(0),
     });
@@ -549,6 +561,56 @@ async fn chat(s: &Setup, device: Uuid, text: &str) -> Value {
     let (status, _, body) = s.send(req).await;
     assert_eq!(status, StatusCode::OK);
     serde_json::from_slice(&body).unwrap()
+}
+
+fn research_turn() -> ModelTurn {
+    ModelTurn {
+        tool_calls: vec![ToolCall {
+            id: "r1".into(),
+            name: "web_research".into(),
+            arguments: r#"{"action":"news"}"#.into(),
+            thought_signature: None,
+        }],
+        ..ModelTurn::default()
+    }
+}
+
+#[tokio::test]
+async fn small_talk_is_never_forced_into_a_tool() {
+    let Some((s, tools, device, _)) = named_tool_setup("web_research", Effect::Auto).await else {
+        return;
+    };
+    s.llm.push(tool_turn(false, "Hallo!"));
+    s.llm.push(tool_turn(false, "Hallo, schön dich zu hören."));
+    let reply = chat(&s, device, "Hallo").await;
+    assert_eq!(reply["reply"], "Hallo, schön dich zu hören.");
+    assert_eq!(*tools.calls.lock().unwrap(), 0);
+    assert!(s
+        .llm
+        .offered
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(_, forced)| !forced));
+}
+
+#[tokio::test]
+async fn asking_again_for_the_same_research_ends_in_an_answer() {
+    let Some((s, tools, device, _)) = named_tool_setup("web_research", Effect::Auto).await else {
+        return;
+    };
+    s.llm.push(research_turn());
+    s.llm.push(research_turn());
+    s.llm.push(tool_turn(false, "Die Schlagzeilen sind ..."));
+    let reply = chat(&s, device, "Was gibt es Neues?").await;
+    assert_eq!(reply["reply"], "Die Schlagzeilen sind ...");
+    assert_eq!(*tools.calls.lock().unwrap(), 1);
+    // After the repeat the model only gets to answer, without tools.
+    let offered = s.llm.offered.lock().unwrap();
+    assert_eq!(
+        offered.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        vec![1, 1, 0]
+    );
 }
 
 #[tokio::test]

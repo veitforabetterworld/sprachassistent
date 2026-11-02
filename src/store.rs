@@ -117,6 +117,14 @@ impl Store {
         Ok(rows.into_iter().collect())
     }
 
+    /// The voices the devices speak with, to load them before the first question.
+    pub async fn device_voices(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT DISTINCT voice FROM devices")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(|(voice,)| voice).collect())
+    }
+
     pub async fn device(&self, id: Uuid) -> Result<Option<Device>> {
         Ok(sqlx::query_as(&format!(
             "SELECT {DEVICE_COLUMNS} FROM devices WHERE id = $1"

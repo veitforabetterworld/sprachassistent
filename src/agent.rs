@@ -444,11 +444,9 @@ async fn drive(
                 offered_owned.as_slice()
             }
         };
-        let force_tool = nudged && phase == PromptPhase::Lookup;
-        // `complete` moves on to the next model by itself when one is at its limit.
-        let turn_result = llm
-            .complete(&providers, sent, offered, false, force_tool)
-            .await;
+        // Tools are offered, never forced: a greeting needs none, and a forced call kept the
+        // model from ever answering. `complete` moves on to the next model at a limit.
+        let turn_result = llm.complete(&providers, sent, offered, false, false).await;
         let mut turn = match turn_result {
             Ok(turn) => turn,
             Err(e) => {
@@ -580,6 +578,7 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
         let mut auto = Vec::new();
         let mut confirm = Vec::new();
         let mut finished = Vec::new();
+        let mut repeated = 0usize;
         for call in turn.tool_calls {
             let Some(offer) = offer_for(&offers, &aliases, &call.name) else {
                 finished.push((call, "Dieses Werkzeug gibt es nicht.".into()));
@@ -591,6 +590,7 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
             if tool_kind(&exec.name) == ToolKind::Research
                 && !researched.insert(research_key(&exec.arguments))
             {
+                repeated += 1;
                 finished.push((exec, ALREADY_READ.into()));
                 continue;
             }
@@ -628,8 +628,11 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
             }
         }
         let saw_action = kept_action;
-        research_steps += research_now;
-        let stop_research = research_now > 0 && research_steps >= 4 && !saw_action;
+        research_steps += research_now + repeated;
+        // Asking again for what is already above means the model has what it can get: answer.
+        let only_repeats = repeated > 0 && research_now == 0 && !saw_action && !saw_state;
+        let stop_research =
+            only_repeats || (research_now + repeated > 0 && research_steps >= 4 && !saw_action);
         finished.extend(
             execute(
                 &tools,
