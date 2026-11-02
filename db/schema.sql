@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS llm_providers (
 -- Free tiers prepared once; only the key is missing (console.groq.com, aistudio.google.com).
 INSERT INTO llm_providers (name, base_url, model, priority)
 SELECT * FROM (VALUES
-  ('Groq', 'https://api.groq.com/openai/v1', 'llama-3.3-70b-versatile', 10),
+  ('Groq', 'https://api.groq.com/openai/v1', 'qwen/qwen3.8-27b', 10),
   ('Google Gemini', 'https://generativelanguage.googleapis.com/v1beta/openai', 'gemini-2.5-flash-lite', 20)
 ) AS seed(name, base_url, model, priority)
 WHERE NOT EXISTS (SELECT 1 FROM llm_providers);

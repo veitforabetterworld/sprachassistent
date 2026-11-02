@@ -19,7 +19,7 @@ const PRESETS: Record<string, ProviderInput & { keyUrl?: string }> = {
   groq: {
     name: "Groq",
     base_url: "https://api.groq.com/openai/v1",
-    model: "llama-3.3-70b-versatile",
+    model: "qwen/qwen3.8-27b",
     api_key: "",
     enabled: true,
     priority: 10,
