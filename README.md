@@ -134,7 +134,7 @@ Dieselbe Verkabelung als Tabelle:
 | WS | GPIO 33 | | DIN | GPIO 27 |
 | SD | GPIO 34 | | SD, GAIN | offen |
 
-Taster zwischen GPIO 13 und GND. Die Onboard-LED (GPIO 2) leuchtet während der Aufnahme. Blinkt sie dreimal, kam keine Antwort; fünfmal heißt, es gab keine Verbindung.
+Taster zwischen GPIO 5 und GND, beide auf der rechten Stiftleiste. GPIO 5 ist ein Strapping-Pin, deshalb den Taster beim Einschalten nicht gedrückt halten. Die Onboard-LED (GPIO 2) leuchtet während der Aufnahme. Blinkt sie dreimal, kam keine Antwort; fünfmal heißt, es gab keine Verbindung.
 
 `firmware/include/secrets.example.h` nach `secrets.h` kopieren (WLAN, als `API_KEY` den ESP-Schlüssel aus dem Adminbereich, optional das Let's-Encrypt-Root-Zertifikat), dann:
 

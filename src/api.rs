@@ -24,7 +24,7 @@ use crate::assistant::{Assistant, NOT_UNDERSTOOD};
 use crate::audio;
 use crate::llm::ChatMessage;
 use crate::sentences::SentenceSplitter;
-use crate::speech::{is_hallucination, voice_label, SpeechToText, TextToSpeech, VoiceBank};
+use crate::speech::{clean_transcript, voice_label, SpeechToText, TextToSpeech, VoiceBank};
 use crate::store::Device;
 
 /// 30 s of 16 kHz 16-bit audio is under 1 MB; WAV uploads from a PC may be stereo/44.1 kHz.
@@ -157,11 +157,7 @@ async fn recognize(state: &AppState, body: &[u8], rate: u32) -> ApiResult<String
         "Erkannt in {:.1} s ({seconds:.1} s Audio): {text}",
         started.elapsed().as_secs_f32()
     );
-    Ok(if is_hallucination(&text) {
-        String::new()
-    } else {
-        text
-    })
+    Ok(clean_transcript(&text))
 }
 
 /// Speaks each sentence as soon as it is synthesized. Raw PCM by default, WAV with `wav`.

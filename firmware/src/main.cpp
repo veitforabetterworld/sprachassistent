@@ -20,8 +20,8 @@ constexpr int MIC_SD = 34;
 constexpr int AMP_BCLK = 26;
 constexpr int AMP_LRC = 25;
 constexpr int AMP_DIN = 27;
-// Taster gegen GND
-constexpr int BUTTON = 13;
+// Taster gegen GND (rechte Stiftleiste). GPIO 5 ist ein Strapping-Pin: beim Einschalten nicht drücken.
+constexpr int BUTTON = 5;
 constexpr int LED = 2;
 
 constexpr i2s_port_t MIC_PORT = I2S_NUM_0;
@@ -29,13 +29,17 @@ constexpr i2s_port_t AMP_PORT = I2S_NUM_1;
 constexpr uint32_t MIC_RATE = 16000;
 // Der INMP441 liefert 24 Bit im 32-Bit-Wort. >> 16 waere Originalpegel, >> 14 verstaerkt 4-fach.
 constexpr int MIC_SHIFT = 14;
-constexpr int VOLUME_PERCENT = 70;
+// Lautstaerke in Prozent; ueber 100 verstaerkt, Spitzen werden begrenzt statt umzuklappen.
+constexpr int VOLUME_PERCENT = 250;
 constexpr uint32_t MAX_RECORD_MS = 20000;
 // Puffert ca. 1,5 s Audio, waehrend die Verbindung (TLS-Handshake) aufgebaut wird.
-constexpr size_t AUDIO_BUFFER_BYTES = 48 * 1024;
+constexpr size_t AUDIO_BUFFER_BYTES = 96 * 1024;
 
 static StreamBufferHandle_t audioBuffer;
 static volatile bool recording = false;
+// Fuer das Protokoll: verworfene Bytes (Puffer voll) und hoechster Pegel der Aufnahme.
+static volatile size_t droppedBytes = 0;
+static volatile int32_t peakLevel = 0;
 
 #if USE_TLS
 static WiFiClientSecure client;
@@ -50,8 +54,9 @@ static void setupMic() {
   cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
   cfg.sample_rate = MIC_RATE;
   cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;
-  // Bleibt es stumm, hier I2S_CHANNEL_FMT_ONLY_RIGHT probieren (je nach ESP32-Revision vertauscht).
-  cfg.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+  // L/R an GND ist der linke Kanal, der Treiber des ESP32 liefert ihn aber unter ONLY_RIGHT
+  // (gemessen mit src/hwtest.cpp; mit ONLY_LEFT kommen nur Nullen).
+  cfg.channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT;
   cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
   cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
   cfg.dma_buf_count = 8;
@@ -100,8 +105,10 @@ static void micTask(void*) {
     size_t n = bytesRead / sizeof(int32_t);
     for (size_t i = 0; i < n; i++) {
       pcm[i] = (int16_t)constrain(raw[i] >> MIC_SHIFT, -32768, 32767);
+      if (abs(pcm[i]) > peakLevel) peakLevel = abs(pcm[i]);
     }
-    xStreamBufferSend(audioBuffer, pcm, n * sizeof(int16_t), 0);  // voll = verwerfen
+    size_t bytes = n * sizeof(int16_t);
+    droppedBytes += bytes - xStreamBufferSend(audioBuffer, pcm, bytes, 0);  // voll = verwerfen
   }
 }
 
@@ -120,7 +127,7 @@ static void playBytes(const uint8_t* data, size_t len) {
     frames = 0;
   };
   auto push = [&](int16_t s) {
-    int16_t v = (int32_t)s * VOLUME_PERCENT / 100;
+    int16_t v = (int16_t)constrain((int32_t)s * VOLUME_PERCENT / 100, -32768, 32767);
     stereo[2 * frames] = v;
     stereo[2 * frames + 1] = v;
     if (++frames == 256) flush();
@@ -236,10 +243,14 @@ static void playResponse() {
 static void conversation() {
   digitalWrite(LED, HIGH);
   xStreamBufferReset(audioBuffer);
+  droppedBytes = 0;
+  peakLevel = 0;
   recording = true;
   uint32_t start = millis();
 
-  if (!client.connect(SERVER_HOST, SERVER_PORT)) {
+  bool connected = client.connect(SERVER_HOST, SERVER_PORT);
+  uint32_t connectMs = millis() - start;
+  if (!connected) {
     recording = false;
     digitalWrite(LED, LOW);
     Serial.println("Verbindung zum Server fehlgeschlagen");
@@ -257,8 +268,12 @@ static void conversation() {
 
   static uint8_t buf[2048];
   size_t sent = 0;
+  uint32_t pressed = 0;
   for (;;) {
-    if (digitalRead(BUTTON) == HIGH || millis() - start > MAX_RECORD_MS) recording = false;
+    if (recording && (digitalRead(BUTTON) == HIGH || millis() - start > MAX_RECORD_MS)) {
+      recording = false;
+      pressed = millis() - start;
+    }
     size_t n = xStreamBufferReceive(audioBuffer, buf, sizeof(buf), pdMS_TO_TICKS(40));
     if (n > 0) {
       writeChunk(buf, n);
@@ -269,7 +284,11 @@ static void conversation() {
   }
   client.print("0\r\n\r\n");
   digitalWrite(LED, LOW);
-  Serial.printf("%.1f s Audio gesendet, warte auf Antwort\n", sent / 2.0 / MIC_RATE);
+  Serial.printf(
+      "Taster %.1f s gedrueckt, %.1f s Audio gesendet, %.1f s verworfen, Spitzenpegel %d/32767, "
+      "Verbindung nach %u ms\n",
+      pressed / 1000.0, sent / 2.0 / MIC_RATE, droppedBytes / 2.0 / MIC_RATE, (int)peakLevel,
+      (unsigned)connectMs);
 
   playResponse();
   client.stop();
@@ -281,11 +300,27 @@ static void connectWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);  // sonst deutlich hoehere Latenz
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("WLAN");
+  Serial.printf("WLAN %s", WIFI_SSID);
+  uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print('.');
     digitalWrite(LED, !digitalRead(LED));
     delay(300);
+    if (millis() - start > 15000) {
+      // Hilft bei der Fehlersuche: Ist das Netz ueberhaupt sichtbar (nur 2,4 GHz)?
+      Serial.printf("\nKeine Verbindung (Status %d). Sichtbare Netze:\n", WiFi.status());
+      WiFi.disconnect();
+      delay(100);
+      int n = WiFi.scanNetworks();
+      if (n <= 0) Serial.printf("  keine (scanNetworks = %d)\n", n);
+      for (int i = 0; i < n; i++) {
+        Serial.printf("  %-32s Kanal %2d  %4d dBm%s\n", WiFi.SSID(i).c_str(), WiFi.channel(i),
+                      WiFi.RSSI(i), WiFi.SSID(i) == WIFI_SSID ? "  <- konfiguriert" : "");
+      }
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      start = millis();
+    }
   }
   digitalWrite(LED, LOW);
   Serial.printf(" verbunden, IP %s\n", WiFi.localIP().toString().c_str());

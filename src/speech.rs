@@ -32,17 +32,36 @@ pub fn voice_label(id: &str) -> String {
     }
 }
 
-/// Whisper invents text on silence or noise, typically subtitle credits from its training data.
-pub fn is_hallucination(text: &str) -> bool {
+/// Whisper annotates noise as "[Musik]" or "(Lachen)" and invents subtitle credits from its
+/// training data on silence. Annotations are removed; a credit line drops the whole transcript.
+pub fn clean_transcript(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut depth, mut starred) = (0, false);
+    for c in text.chars() {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' if depth > 0 => depth -= 1,
+            '*' => starred = !starred,
+            _ if depth == 0 && !starred => out.push(c),
+            _ => {}
+        }
+    }
+    let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if is_hallucination(&out) {
+        String::new()
+    } else {
+        out
+    }
+}
+
+fn is_hallucination(text: &str) -> bool {
     let t = text.to_lowercase();
-    t.is_empty()
+    !t.chars().any(char::is_alphanumeric)
         || [
             "untertitel",
             "zdf",
             "copyright",
             "vielen dank fürs zuschauen",
-            "[musik]",
-            "(musik)",
         ]
         .iter()
         .any(|h| t.contains(h))
@@ -263,12 +282,23 @@ mod piper {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn detects_whisper_hallucinations() {
-        assert!(super::is_hallucination(
-            "Untertitel im Auftrag des ZDF, 2021"
-        ));
-        assert!(super::is_hallucination(""));
-        assert!(!super::is_hallucination("Wie wird das Wetter morgen?"));
+    fn cleans_whisper_transcripts() {
+        use super::clean_transcript as clean;
+        assert_eq!(
+            clean("Hi, wie wird das Wetter morgen? [Musik]"),
+            "Hi, wie wird das Wetter morgen?"
+        );
+        assert_eq!(
+            clean("(Lachen) Erzähl mir einen Witz *räuspert*"),
+            "Erzähl mir einen Witz"
+        );
+        assert_eq!(clean("Untertitel im Auftrag des ZDF, 2021"), "");
+        assert_eq!(clean("[Musik]"), "");
+        assert_eq!(clean(" ... "), "");
+        assert_eq!(
+            clean("Wie wird das Wetter morgen?"),
+            "Wie wird das Wetter morgen?"
+        );
     }
 
     #[test]
