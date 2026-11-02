@@ -19,7 +19,13 @@ pub struct ToolCall {
     pub name: String,
     /// JSON object as text, the shape chat completions return.
     pub arguments: String,
+    /// Gemini 3 signs its tool calls and wants the signature back on the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
+
+/// Gemini accepts this in place of a signature it never gave, e.g. for a call another model made.
+const UNSIGNED: &str = "skip_thought_signature_validator";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolDef {
@@ -57,7 +63,9 @@ impl ChatMessage {
         }
     }
 
-    fn to_api(&self) -> Value {
+    /// `google`: the request goes to Gemini, which needs the signatures of earlier tool calls;
+    /// other providers reject the unknown field.
+    fn to_api(&self, google: bool) -> Value {
         if self.role == "tool" {
             return json!({
                 "role": "tool",
@@ -70,11 +78,23 @@ impl ChatMessage {
                 .tool_calls
                 .iter()
                 .map(|c| {
-                    json!({
+                    let mut call = json!({
                         "id": c.id,
                         "type": "function",
                         "function": { "name": c.name, "arguments": c.arguments },
-                    })
+                    });
+                    // Of parallel calls only the first is signed; an unsigned turn gets the stand-in once.
+                    let signature = c.thought_signature.as_deref().or_else(|| {
+                        let signed = self
+                            .tool_calls
+                            .iter()
+                            .any(|c| c.thought_signature.is_some());
+                        (!signed && self.tool_calls[0].id == c.id).then_some(UNSIGNED)
+                    });
+                    if let (true, Some(signature)) = (google, signature) {
+                        call["extra_content"] = json!({"google": {"thought_signature": signature}});
+                    }
+                    call
                 })
                 .collect();
             return json!({
@@ -196,7 +216,8 @@ impl Llm {
         tools: &[ToolDef],
         force_tool: bool,
     ) -> Value {
-        let api_messages: Vec<Value> = messages.iter().map(ChatMessage::to_api).collect();
+        let google = p.base_url.contains("generativelanguage.googleapis.com");
+        let api_messages: Vec<Value> = messages.iter().map(|m| m.to_api(google)).collect();
         let max_tokens = if json_mode {
             600
         } else if tools.is_empty() {
@@ -369,6 +390,7 @@ fn salvage_tool_call(error: &str, tools: &[ToolDef]) -> Option<ToolCall> {
             id: "salvage".into(),
             name: "web_search".into(),
             arguments: "{}".into(),
+            thought_signature: None,
         });
     }
     let inline = inline_tool_call(error);
@@ -390,6 +412,7 @@ fn salvage_tool_call(error: &str, tools: &[ToolDef]) -> Option<ToolCall> {
         id: "salvage".into(),
         name,
         arguments,
+        thought_signature: None,
     })
 }
 
@@ -480,6 +503,7 @@ pub fn inline_tool_call(content: &str) -> Option<ToolCall> {
         id: "text".into(),
         name: name.to_string(),
         arguments: Value::Object(args).to_string(),
+        thought_signature: None,
     })
 }
 
@@ -533,12 +557,32 @@ fn common_prefix(left: &str, right: &str) -> usize {
         .count()
 }
 
+pub const ALL_AT_LIMIT: &str = "alle am Limit";
+
+/// The error after the last provider failed. Only when every one was at its limit or overloaded
+/// does it say so; one real error (bad key, bad request) is not hidden behind "limit".
 fn no_provider(errors: Vec<String>) -> anyhow::Error {
     if errors.is_empty() {
         anyhow!("kein KI-Modell eingerichtet (Adminbereich: KI-Modelle, API-Key eintragen)")
+    } else if errors.iter().all(|e| transient_failure(e)) {
+        anyhow!(
+            "kein KI-Modell erreichbar, {ALL_AT_LIMIT} ({})",
+            errors.join("; ")
+        )
     } else {
         anyhow!("kein KI-Modell erreichbar ({})", errors.join("; "))
     }
+}
+
+/// Limit, overload or no answer in time: worth trying again a little later.
+pub fn transient_failure(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    ["429", "413", "502", "503", "504"]
+        .iter()
+        .any(|code| detail.contains(code))
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("keine antwort nach")
 }
 
 fn parse_turn(v: &Value, provider: &str) -> Result<ModelTurn> {
@@ -570,10 +614,14 @@ fn parse_tool_call(v: &Value) -> Option<ToolCall> {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     };
+    let thought_signature = v["extra_content"]["google"]["thought_signature"]
+        .as_str()
+        .map(str::to_string);
     Some(ToolCall {
         id,
         name,
         arguments,
+        thought_signature,
     })
 }
 
@@ -772,11 +820,74 @@ mod tests {
                 id: "c1".into(),
                 name: "echo".into(),
                 arguments: "{\"text\":\"x\"}".into(),
+                thought_signature: None,
             }],
         };
-        let api = message.to_api();
+        let api = message.to_api(false);
         assert_eq!(api["tool_calls"][0]["function"]["name"], "echo");
         assert!(api["content"].is_null());
+        assert!(api["tool_calls"][0].get("extra_content").is_none());
+    }
+
+    #[test]
+    fn gemini_gets_its_signatures_back_and_others_never_see_them() {
+        let v = json!({
+            "choices": [{"message": {"content": null, "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "web_research", "arguments": "{}"},
+                 "extra_content": {"google": {"thought_signature": "sig-a"}}},
+                {"id": "b", "type": "function", "function": {"name": "web_research", "arguments": "{}"}}
+            ]}}]
+        });
+        let turn = parse_turn(&v, "Google Gemini").unwrap();
+        assert_eq!(
+            turn.tool_calls[0].thought_signature.as_deref(),
+            Some("sig-a")
+        );
+        let message = ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: turn.tool_calls,
+        };
+        let google = message.to_api(true);
+        assert_eq!(
+            google["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+            "sig-a"
+        );
+        // Parallel calls: only the first carries one, as Gemini sent them.
+        assert!(google["tool_calls"][1].get("extra_content").is_none());
+        assert!(message.to_api(false)["tool_calls"][0]
+            .get("extra_content")
+            .is_none());
+
+        // A call from another model has none; Gemini gets the stand-in on the first.
+        let unsigned = ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![ToolCall {
+                id: "g".into(),
+                name: "web_research".into(),
+                arguments: "{}".into(),
+                thought_signature: None,
+            }],
+        };
+        assert_eq!(
+            unsigned.to_api(true)["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+            UNSIGNED
+        );
+    }
+
+    #[test]
+    fn limit_only_when_every_model_is_at_its_limit() {
+        let both = no_provider(vec!["Groq: HTTP 429".into(), "Gemini: HTTP 503".into()]);
+        assert!(both.to_string().contains(ALL_AT_LIMIT));
+        let mixed = no_provider(vec![
+            "Gemini: HTTP 400 Bad Request".into(),
+            "Groq: HTTP 429".into(),
+        ]);
+        assert!(!mixed.to_string().contains(ALL_AT_LIMIT));
+        assert!(transient_failure("keine Antwort nach 10 s"));
     }
 
     #[test]

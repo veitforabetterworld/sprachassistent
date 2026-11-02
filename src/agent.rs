@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::assistant::{self, NO_ANSWER};
 use crate::authz::{approval_word, frame_tool_result, truncate, validate_args, Approval, Effect};
-use crate::llm::{model_tool_names, ChatMessage, ChatModel, ToolCall, ToolDef};
+use crate::llm::{model_tool_names, ChatMessage, ChatModel, ToolCall, ToolDef, ALL_AT_LIMIT};
 use crate::runs::{RunGuard, CANCELLED, COMPLETED, FAILED, WAITING};
 use crate::secrets::Secrets;
 use crate::sentences::SentenceSplitter;
@@ -896,20 +896,12 @@ fn should_nudge(
     phase == PromptPhase::Lookup && no_tool_call && !nudged && !gathered && lookup_offered
 }
 
-fn transient_provider_failure(detail: &str) -> bool {
-    ["429", "413", "502", "503", "504"]
-        .iter()
-        .any(|code| detail.contains(code))
-        || detail.to_ascii_lowercase().contains("timed out")
-        || detail.to_ascii_lowercase().contains("timeout")
-}
-
 const RATE_LIMIT_REPLY: &str = "Alle KI-Modelle sind gerade am Limit. Versuch es gleich nochmal.";
 
 fn provider_failure_reply(detail: &str) -> String {
     if detail.contains("tool_use_failed") {
         "Dafür habe ich kein passendes Werkzeug gefunden.".into()
-    } else if transient_provider_failure(detail) {
+    } else if detail.contains(ALL_AT_LIMIT) {
         RATE_LIMIT_REPLY.into()
     } else {
         "Die KI-Modelle sind gerade nicht erreichbar. Versuch es gleich nochmal.".into()
@@ -1065,14 +1057,11 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_moves_to_the_next_provider() {
-        assert!(transient_provider_failure(
-            "Groq: HTTP 429 Too Many Requests: Rate limit reached"
-        ));
-        assert!(transient_provider_failure("HTTP 503"));
-        assert!(!transient_provider_failure("tool_use_failed"));
-        let reply = provider_failure_reply("Groq: HTTP 429 Too Many Requests");
-        assert_eq!(reply, RATE_LIMIT_REPLY);
+    fn limit_is_only_reported_when_every_model_is_at_it() {
+        let all = format!("kein KI-Modell erreichbar, {ALL_AT_LIMIT} (Groq: HTTP 429)");
+        assert_eq!(provider_failure_reply(&all), RATE_LIMIT_REPLY);
+        let mixed = "kein KI-Modell erreichbar (Google Gemini: HTTP 400; Groq: HTTP 429)";
+        assert_ne!(provider_failure_reply(mixed), RATE_LIMIT_REPLY);
         assert!(!provider_failure_reply("Groq: HTTP 401").contains("401"));
     }
 

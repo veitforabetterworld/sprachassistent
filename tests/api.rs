@@ -479,6 +479,7 @@ fn tool_turn(call: bool, text: &str) -> ModelTurn {
                 id: "c1".into(),
                 name: "echo".into(),
                 arguments: "{}".into(),
+                thought_signature: None,
             }],
             ..ModelTurn::default()
         }
