@@ -13,7 +13,7 @@ use crate::assistant::{self, NO_ANSWER};
 use crate::authz::{approval_word, frame_tool_result, truncate, validate_args, Approval, Effect};
 use crate::llm::{model_tool_names, ChatMessage, ChatModel, Provider, ToolCall, ToolDef};
 use crate::runs::{RunGuard, CANCELLED, COMPLETED, FAILED, WAITING};
-use crate::secrets::{redact, Secrets};
+use crate::secrets::Secrets;
 use crate::sentences::SentenceSplitter;
 use crate::store::{Device, Store, StoredMessage};
 use crate::tools::{ToolExecutor, ToolOffer};
@@ -218,10 +218,18 @@ async fn stream_reply(
                 }
             }
         }
-        Err(e) => tracing::error!("{}: {e:#}", device.name),
+        Err(e) => {
+            tracing::error!("{}: {e:#}", device.name);
+            let reply = provider_failure_reply(&e.to_string());
+            let _ = store.add_message(device.id, "user", user_text).await;
+            let _ = store.add_message(device.id, "assistant", &reply).await;
+            return fail(&say, &mut guard, &reply).await;
+        }
     }
     let reply = full.trim().to_string();
     if reply.is_empty() {
+        let _ = store.add_message(device.id, "user", user_text).await;
+        let _ = store.add_message(device.id, "assistant", NO_ANSWER).await;
         return fail(&say, &mut guard, NO_ANSWER).await;
     }
     let _ = store.add_message(device.id, "user", user_text).await;
@@ -346,14 +354,18 @@ async fn drive(
     offers: Vec<ToolOffer>,
     save_user: bool,
 ) -> TurnResult {
-    let mut providers: Vec<Provider> = match store.providers_for(&device, &secrets).await {
-        Ok(list) => list.into_iter().filter(|p| p.supports_tools).collect(),
+    let all_providers = match store.providers_for(&device, &secrets).await {
+        Ok(list) => list,
         Err(e) => {
             tracing::error!("{e:#}");
             return fail(&say, &mut guard, NO_ANSWER).await;
         }
     };
-    let all_providers = providers.clone();
+    let mut providers: Vec<Provider> = all_providers
+        .iter()
+        .filter(|provider| provider.supports_tools)
+        .cloned()
+        .collect();
     if providers.is_empty() {
         tracing::warn!(
             "{}: kein Anbieter mit Werkzeugen, Antwort ohne Werkzeuge",
@@ -443,29 +455,30 @@ async fn drive(
         let mut turn_result = llm
             .complete(&providers, sent, offered, false, force_tool)
             .await;
-        let provider_down = match &turn_result {
-            Err(error) => {
-                providers.len() == 1
-                    && all_providers.len() > 1
-                    && transient_provider_failure(&error.to_string())
-            }
-            Ok(_) => false,
-        };
-        if provider_down {
-            let failed = providers[0].name.clone();
-            let others: Vec<Provider> = all_providers
+        if matches!(&turn_result, Err(error) if transient_provider_failure(&error.to_string())) {
+            let tried: Vec<String> = providers
                 .iter()
-                .filter(|provider| provider.name != failed)
-                .cloned()
+                .filter(|provider| offered.is_empty() || provider.supports_tools)
+                .map(|provider| provider.name.clone())
                 .collect();
-            if !others.is_empty() {
+            let rest = providers_after_rate_limit(&all_providers, &tried, !offered.is_empty());
+            if !rest.is_empty() {
                 tracing::warn!(
-                    "{}: {failed} ausgefallen, nächster Anbieter übernimmt",
-                    device.name
+                    "{}: {} am Limit, nächstes Modell",
+                    device.name,
+                    tried.join(", ")
                 );
-                turn_result = llm
-                    .complete(&others, sent, offered, false, force_tool)
-                    .await;
+                turn_result = llm.complete(&rest, sent, offered, false, force_tool).await;
+            }
+            if turn_result.is_err() && !offered.is_empty() {
+                let plain = providers_after_rate_limit(&all_providers, &tried, false)
+                    .into_iter()
+                    .filter(|provider| !provider.supports_tools)
+                    .collect::<Vec<_>>();
+                if !plain.is_empty() {
+                    tracing::warn!("{}: nächstes Modell ohne Werkzeuge", device.name);
+                    turn_result = llm.complete(&plain, sent, &[], false, false).await;
+                }
             }
         }
         let mut turn = match turn_result {
@@ -485,21 +498,11 @@ Argumente aus dem vorherigen Werkzeugergebnis übernehmen.",
                     continue;
                 }
                 tracing::error!("{}: {e:#}", device.name);
-                let reply = match channel {
-                    Channel::Text => {
-                        let detail = e.to_string();
-                        if detail.contains("tool_use_failed") {
-                            "Dafür habe ich kein passendes Werkzeug gefunden.".into()
-                        } else {
-                            let detail = detail.lines().next().unwrap_or("unbekannt");
-                            format!(
-                                "Die KI-Anfrage ist fehlgeschlagen: {}",
-                                truncate(&redact(detail), 220)
-                            )
-                        }
-                    }
-                    Channel::Voice => NO_ANSWER.to_string(),
-                };
+                let reply = provider_failure_reply(&detail);
+                if !user_saved && !user_text.is_empty() {
+                    let _ = store.add_message(device.id, "user", user_text).await;
+                }
+                let _ = store.add_message(device.id, "assistant", &reply).await;
                 return fail(&say, &mut guard, &reply).await;
             }
         };
@@ -917,6 +920,32 @@ fn transient_provider_failure(detail: &str) -> bool {
         || detail.to_ascii_lowercase().contains("timeout")
 }
 
+const RATE_LIMIT_REPLY: &str = "Alle KI-Modelle sind gerade am Limit. Versuch es gleich nochmal.";
+
+fn provider_failure_reply(detail: &str) -> String {
+    if detail.contains("tool_use_failed") {
+        "Dafür habe ich kein passendes Werkzeug gefunden.".into()
+    } else if transient_provider_failure(detail) {
+        RATE_LIMIT_REPLY.into()
+    } else {
+        "Die KI-Modelle sind gerade nicht erreichbar. Versuch es gleich nochmal.".into()
+    }
+}
+
+/// Active models that have not just hit the limit. A tool turn only keeps models that can
+/// call tools; the caller asks the others afterwards to write the answer without tools.
+fn providers_after_rate_limit(
+    all: &[Provider],
+    tried: &[String],
+    need_tools: bool,
+) -> Vec<Provider> {
+    all.iter()
+        .filter(|provider| !tried.iter().any(|name| name == &provider.name))
+        .filter(|provider| !need_tools || provider.supports_tools)
+        .cloned()
+        .collect()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PromptPhase {
     Lookup,
@@ -1062,6 +1091,23 @@ mod tests {
         ));
         assert!(transient_provider_failure("HTTP 503"));
         assert!(!transient_provider_failure("tool_use_failed"));
+        let groq = Provider::new("Groq", "http://groq", String::new(), "qwen".into(), true);
+        let gemini = Provider::new(
+            "Gemini",
+            "http://gemini",
+            String::new(),
+            "flash".into(),
+            false,
+        );
+        let all = [groq, gemini];
+        let next = providers_after_rate_limit(&all, &["Groq".into()], true);
+        assert!(next.is_empty());
+        let plain = providers_after_rate_limit(&all, &["Groq".into()], false);
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].name, "Gemini");
+        let reply = provider_failure_reply("Groq: HTTP 429 Too Many Requests");
+        assert_eq!(reply, RATE_LIMIT_REPLY);
+        assert!(!provider_failure_reply("Groq: HTTP 401").contains("401"));
     }
 
     #[test]
