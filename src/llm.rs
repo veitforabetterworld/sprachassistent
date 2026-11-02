@@ -135,6 +135,11 @@ impl Provider {
     }
 }
 
+/// A model that has not answered by then is overloaded or stuck; the next one is asked.
+const ANSWER_WAIT: Duration = Duration::from_secs(10);
+/// Upper limit for a streamed reply that has already started.
+const REPLY_TOTAL: Duration = Duration::from_secs(60);
+
 pub struct Llm {
     client: reqwest::Client,
 }
@@ -147,30 +152,31 @@ impl Llm {
         Ok(Self { client })
     }
 
-    async fn post(
-        &self,
-        p: &Provider,
-        body: &Value,
-        timeout: Duration,
-    ) -> Result<reqwest::Response> {
+    /// `wait` bounds the time until the model answers; a non-streamed reply arrives in one piece,
+    /// so that is its whole time. A stream that has started may run up to `REPLY_TOTAL`.
+    async fn post(&self, p: &Provider, body: &Value, wait: Duration) -> Result<reqwest::Response> {
         let mut req = self
             .client
             .post(format!("{}/chat/completions", p.base_url))
-            .timeout(timeout)
+            .timeout(REPLY_TOTAL)
             .json(body);
         if !p.api_key.is_empty() {
             req = req.bearer_auth(&p.api_key);
         }
+        let no_answer = || anyhow!("keine Antwort nach {} s", wait.as_secs());
         // reqwest says "error sending request" for both; the admin test should name the reason.
-        let resp = req.send().await.map_err(|e| {
-            if e.is_timeout() {
-                anyhow!("keine Antwort nach {} s", timeout.as_secs())
-            } else if e.is_connect() {
-                anyhow!("keine Verbindung zu {}", p.base_url)
-            } else {
-                e.into()
-            }
-        })?;
+        let resp = tokio::time::timeout(wait, req.send())
+            .await
+            .map_err(|_| no_answer())?
+            .map_err(|e| {
+                if e.is_timeout() {
+                    no_answer()
+                } else if e.is_connect() {
+                    anyhow!("keine Verbindung zu {}", p.base_url)
+                } else {
+                    e.into()
+                }
+            })?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -582,7 +588,7 @@ impl ChatModel for Llm {
         let mut errors = Vec::new();
         for p in providers {
             let body = Self::body(p, messages, true, false, &[], false);
-            match self.post(p, &body, Duration::from_secs(60)).await {
+            match self.post(p, &body, ANSWER_WAIT).await {
                 Ok(resp) => {
                     tracing::debug!("LLM-Stream von {}", p.name);
                     return Ok(sse_tokens(resp));
@@ -628,7 +634,7 @@ impl Llm {
         force_tool: bool,
     ) -> Result<ModelTurn> {
         let body = Self::body(provider, messages, false, json_mode, tools, force_tool);
-        match self.post(provider, &body, Duration::from_secs(60)).await {
+        match self.post(provider, &body, ANSWER_WAIT).await {
             Ok(resp) => parse_turn(&resp.json().await?, &provider.name),
             Err(e) => {
                 let text = e.to_string();
