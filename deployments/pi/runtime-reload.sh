@@ -41,6 +41,27 @@ fi
 rm -f "${NGINX_FILES[@]/%/.bak}"
 systemctl reload nginx
 
+# One-shot. data/ is not rsynced, so the marker survives the next deploy and
+# a later switch in the admin area stays as the admin left it.
+MARKER="$REPO/data/once-disable-account-verification"
+if [ ! -f "$MARKER" ]; then
+  log "Mailbestätigung aus, unbestätigte Konten frei"
+  sudo -u postgres psql -d sprachassistent -v ON_ERROR_STOP=1 <<'SQL'
+INSERT INTO app_settings (key, value)
+VALUES ('account_verification', '0')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
+UPDATE users
+SET email_verified_at = NOW(),
+    email_verification_token = NULL,
+    email_verification_expires_at = NULL
+WHERE email_verified_at IS NULL;
+SELECT value AS account_verification FROM app_settings WHERE key = 'account_verification';
+SELECT count(*) FILTER (WHERE email_verified_at IS NULL) AS still_unverified, count(*) AS users FROM users;
+SQL
+  mkdir -p "$REPO/data"
+  touch "$MARKER"
+fi
+
 log "pm2 reload"
 # The first version ran the voice server under this name.
 pm2 delete sprachassistent-api >/dev/null 2>&1 || true
