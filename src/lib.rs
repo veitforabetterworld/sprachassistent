@@ -6,6 +6,7 @@ pub mod authz;
 pub mod config;
 pub mod llm;
 pub mod mcp;
+pub mod page;
 pub mod runs;
 pub mod secrets;
 pub mod sentences;

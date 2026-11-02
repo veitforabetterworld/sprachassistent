@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::authz::{validate_args, Effect};
 use crate::mcp;
+use crate::page;
 use crate::secrets::Secrets;
 use crate::store::{Store, ToolRow};
 use anyhow::{anyhow, Result};
@@ -349,42 +350,34 @@ fn worth_reading(url: &str) -> bool {
     path.contains('/') || path.len() > 12
 }
 
-fn decode_entities(text: &str) -> String {
-    text.replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-}
-
 const FOLLOW_LINKS: usize = 5;
+/// Pages are read up to this size; the head alone of a news page can take 200 KB.
+const PAGE_BYTES: usize = 2_000_000;
 
 async fn follow_page(http: &reqwest::Client, url: &str) -> Result<String> {
     if url.is_empty() {
         anyhow::bail!("url fehlt");
     }
-    let page = fetch_html(http, url).await?;
-    let excerpts = article_excerpts(&page, 4000);
-    let text = if excerpts.chars().count() > 80 {
-        excerpts
+    let html = fetch_html(http, url).await?;
+    let page = page::readable(&html);
+    let mut out = if page.text.is_empty() {
+        "Kein lesbarer Text.".to_string()
     } else {
-        page_text(&page, 4000)
+        page.text
     };
-    let links = next_links(&page, url);
-    if links.is_empty() {
-        return Ok(text);
-    }
-    let mut out = text;
-    out.push_str("\n\nWeitere Links:\n");
-    for link in links {
-        out.push_str("- ");
-        out.push_str(&link);
-        out.push('\n');
+    let links = next_links(page.region, url);
+    if !links.is_empty() {
+        out.push_str("\n\nWeitere Links:\n");
+        for link in links {
+            out.push_str("- ");
+            out.push_str(&link);
+            out.push('\n');
+        }
     }
     Ok(out)
 }
 
-/// Article links from a page. Homepages and non-https addresses stay out.
+/// Article links from the content of a page. Homepages, files and non-public addresses stay out.
 fn next_links(html: &str, base: &str) -> Vec<String> {
     let Ok(base_url) = reqwest::Url::parse(base) else {
         return Vec::new();
@@ -399,13 +392,18 @@ fn next_links(html: &str, base: &str) -> Vec<String> {
         let Some(end) = rest.find('"') else {
             break;
         };
-        let raw = decode_entities(&rest[..end]);
+        let raw = page::decode_entities(&rest[..end]);
         rest = &rest[end..];
-        let Ok(absolute) = base_url.join(raw.trim()) else {
+        let Ok(mut absolute) = base_url.join(raw.trim()) else {
             continue;
         };
+        absolute.set_fragment(None);
         let url = absolute.to_string();
-        if !public_url_ok(&absolute) || !worth_reading(&url) || out.iter().any(|have| have == &url)
+        if !public_url_ok(&absolute)
+            || !worth_reading(&url)
+            || is_file(&absolute)
+            || url == base
+            || out.iter().any(|have| have == &url)
         {
             continue;
         }
@@ -414,32 +412,14 @@ fn next_links(html: &str, base: &str) -> Vec<String> {
     out
 }
 
-fn article_excerpts(html: &str, max_chars: usize) -> String {
-    let lower = html.to_ascii_lowercase();
-    let mut parts = Vec::new();
-    let mut from = 0;
-    while parts.len() < 4 {
-        let Some(rel) = lower[from..].find("<article") else {
-            break;
-        };
-        let start = from + rel;
-        let Some(open) = html[start..].find('>') else {
-            break;
-        };
-        let content = start + open + 1;
-        let Some(end_rel) = lower[content..].find("</article") else {
-            break;
-        };
-        let piece = page_text(&html[content..content + end_rel], 240);
-        if piece.chars().count() > 40 {
-            parts.push(piece);
-        }
-        from = content + end_rel + "</article".len();
-        if from >= html.len() {
-            break;
-        }
-    }
-    crate::authz::truncate(&parts.join(" "), max_chars)
+fn is_file(url: &reqwest::Url) -> bool {
+    let path = url.path().to_ascii_lowercase();
+    [
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".avif", ".ico", ".css", ".js", ".json",
+        ".xml", ".woff", ".woff2", ".pdf", ".zip", ".mp3", ".mp4",
+    ]
+    .iter()
+    .any(|ext| path.ends_with(ext))
 }
 
 /// https on a public host. The resolver and the redirect policy of `public_page_client` check the rest.
@@ -531,10 +511,10 @@ async fn fetch_html(http: &reqwest::Client, url: &str) -> Result<String> {
     if !public_url_ok(&parsed) {
         anyhow::bail!("nur öffentliche https-Adressen");
     }
-    let resp = http
+    let mut resp = http
         .get(url)
         .header(reqwest::header::USER_AGENT, "Mozilla/5.0")
-        .timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(10))
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -546,65 +526,18 @@ async fn fetch_html(http: &reqwest::Client, url: &str) -> Result<String> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if !(kind.starts_with("text/")
-        || kind.contains("json")
-        || kind.contains("xml")
-        || kind.is_empty())
-    {
-        anyhow::bail!("kein Text");
+    if !(kind.starts_with("text/") || kind.contains("xhtml") || kind.is_empty()) {
+        anyhow::bail!("keine Webseite");
     }
-    let bytes = resp.bytes().await?;
-    let cut = bytes.len().min(100_000);
-    Ok(String::from_utf8_lossy(&bytes[..cut]).into_owned())
-}
-
-fn page_text(input: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    let mut in_tag = false;
-    let mut skip = false;
-    let lower = input.to_ascii_lowercase();
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let rest = &lower[i..];
-        if rest.starts_with("<script")
-            || rest.starts_with("<style")
-            || rest.starts_with("<nav")
-            || rest.starts_with("<header")
-            || rest.starts_with("<footer")
-            || rest.starts_with("<aside")
-            || rest.starts_with("<noscript")
-            || rest.starts_with("<svg")
-        {
-            skip = true;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() >= PAGE_BYTES {
+            bytes.truncate(PAGE_BYTES);
+            break;
         }
-        if skip
-            && (rest.starts_with("</script")
-                || rest.starts_with("</style")
-                || rest.starts_with("</nav")
-                || rest.starts_with("</header")
-                || rest.starts_with("</footer")
-                || rest.starts_with("</aside")
-                || rest.starts_with("</noscript")
-                || rest.starts_with("</svg"))
-        {
-            skip = false;
-            in_tag = true;
-        }
-        let c = input[i..].chars().next().unwrap_or(' ');
-        let w = c.len_utf8();
-        if c == '<' {
-            in_tag = true;
-        } else if c == '>' {
-            in_tag = false;
-            out.push(' ');
-        } else if !in_tag && !skip {
-            out.push(c);
-        }
-        i += w;
     }
-    let collapsed = out.split_whitespace().collect::<Vec<_>>().join(" ");
-    crate::authz::truncate(&collapsed, max_chars)
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(test)]
@@ -737,31 +670,6 @@ mod tests {
             "https://www.zdfheute.de/newsticker/schlagzeilen-100.html"
         ));
         assert!(!worth_reading("https://www.tagesschau.de/"));
-    }
-
-    #[test]
-    fn article_excerpts_keep_the_story() {
-        let html = "<nav>Menü</nav><article><h2>Haushaltsstreit in Belgien</h2><p>De Wever geht zum König.</p></article><article><p>Kurzer Krümel</p></article>";
-        let text = article_excerpts(html, 400);
-        assert!(text.contains("Haushaltsstreit"));
-        assert!(text.contains("König"));
-        assert!(!text.contains("Menü"));
-        assert!(!text.contains("Krümel"));
-    }
-
-    #[test]
-    fn page_text_drops_navigation() {
-        let text = page_text("<nav>Menü</nav><p>Eilmeldung aus Berlin</p>", 200);
-        assert!(text.contains("Eilmeldung"));
-        assert!(!text.contains("Menü"));
-    }
-
-    #[test]
-    fn strips_tags_and_scripts() {
-        let text = page_text("<p>Hallo</p><script>token</script><b>Welt</b>", 200);
-        assert!(text.contains("Hallo"));
-        assert!(text.contains("Welt"));
-        assert!(!text.contains("token"));
     }
 
     #[test]
