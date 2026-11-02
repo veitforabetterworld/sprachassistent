@@ -51,7 +51,7 @@ log "Health check"
 # Loading whisper takes a few seconds on the Pi.
 for _ in $(seq 1 90); do
   VOICE="$(curl -fsS --max-time 2 http://127.0.0.1:3020/v1/health 2>/dev/null || true)"
-  WEB="$(curl -fsS --max-time 2 http://127.0.0.1:3022/v1/setup 2>/dev/null || true)"
+  WEB="$(curl -fsS --max-time 2 http://127.0.0.1:3022/v1/ready 2>/dev/null || true)"
   if [ -n "$VOICE" ] && [ -n "$WEB" ]; then
     log "voice: $VOICE"
     log "web: $WEB"

@@ -21,6 +21,9 @@ app.use(helmet());
 app.use(express.json({ limit: "1mb" }));
 app.use(auth.attachUser);
 
+app.get("/v1/ready", (_req, res) => {
+  res.json({ ok: true });
+});
 app.use("/v1/admin", adminRouter());
 app.use("/v1", auth.router);
 app.use("/v1", apiKeys.router);
