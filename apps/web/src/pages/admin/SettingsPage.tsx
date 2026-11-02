@@ -5,11 +5,10 @@ import {
   VeitInput,
   VeitList,
   VeitListItem,
-  VeitPasswordField,
+  VeitSecretField,
   VeitSettingsSection,
   VeitSettingsToggleRow,
   VeitStatusBadge,
-  veitInputClass,
 } from "@veit/react-controls";
 import { VeitOverlayEditDialog, useDialogFormBaseline, useManagedOverlayDialogBinding } from "@veit/react-dialog";
 import { adminApi, errorText } from "../../api";
@@ -142,15 +141,18 @@ function SettingsEditDialog({
               hint={f.kind === "password" && values[`${f.key}_set`] ? t("secretSet") : f.hint && t(f.hint)}
             >
               {f.kind === "password" ? (
-                <VeitPasswordField
-                  className={veitInputClass}
+                <VeitSecretField
                   id={f.key}
-                  autoComplete="off"
                   value={draft[f.key]}
+                  onChange={(v) => set(f.key, v)}
+                  stored={values[`${f.key}_set`] === true}
+                  onReveal={() => adminApi.settingSecret(f.key)}
+                  onRevealError={(e) => setError(errorText(e))}
+                  showLabel={t("showPassword")}
+                  hideLabel={t("hidePassword")}
+                  copyLabel={t("copy")}
+                  copiedLabel={t("copied")}
                   disabled={saving}
-                  onChange={(e) => set(f.key, e.target.value)}
-                  showPasswordLabel={t("showPassword")}
-                  hidePasswordLabel={t("hidePassword")}
                 />
               ) : (
                 <VeitInput id={f.key} value={draft[f.key]} disabled={saving} onChange={(e) => set(f.key, e.target.value)} />

@@ -128,7 +128,6 @@ export const de = {
   getFreeKey: "Kostenlosen Key holen",
   showKey: "Key zeigen",
   hideKey: "Key verbergen",
-  loadStoredKey: "Gespeicherten laden",
   priority: "Reihenfolge (kleiner = zuerst)",
   enabled: "Aktiv",
   connection: "Verbindung",

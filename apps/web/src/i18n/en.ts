@@ -130,7 +130,6 @@ export const en: Record<MessageKey, string> = {
   getFreeKey: "Get a free key",
   showKey: "Show key",
   hideKey: "Hide key",
-  loadStoredKey: "Load stored key",
   priority: "Order (lower = first)",
   enabled: "Active",
   connection: "Connection",

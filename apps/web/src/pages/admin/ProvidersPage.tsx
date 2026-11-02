@@ -1,17 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, ChevronRight, Copy, Eye, Loader2 } from "lucide-react";
+import { ChevronRight, Loader2 } from "lucide-react";
 import {
   VeitButton,
   VeitField,
   VeitInput,
   VeitList,
   VeitListItem,
-  VeitPasswordField,
+  VeitSecretField,
   VeitSelect,
   VeitSettingsSection,
   VeitSettingsToggleRow,
   VeitStatusBadge,
-  veitInputClass,
 } from "@veit/react-controls";
 import { VeitOverlayEditDialog, useDialogFormBaseline, useManagedOverlayDialogBinding } from "@veit/react-dialog";
 import { adminApi, errorText, type Provider, type ProviderInput } from "../../api";
@@ -96,48 +95,18 @@ function ProviderEditDialog({
   const [error, setError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [testing, setTesting] = useState(false);
-  /** The stored key once shown; it becomes part of the baseline, so showing it does not count as a change. */
-  const [storedKey, setStoredKey] = useState<string | null>(null);
-  const [loadingKey, setLoadingKey] = useState(false);
-  const [copied, setCopied] = useState(false);
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }));
   useEffect(() => {
     if (open) {
       setDraft(initial);
       setError(null);
       setTestResult(null);
-      setStoredKey(null);
-      setCopied(false);
     }
   }, [open, initial]);
-  const baseline = useMemo(() => (storedKey === null ? initial : { ...initial, api_key: storedKey }), [initial, storedKey]);
-  const { dirty, formBaseline } = useDialogFormBaseline({ draft, resolveBaseline: () => baseline, resetDeps: [open, baseline], track: open });
+  // The key stays empty unless a new one is typed; showing the stored one is not a change.
+  const { dirty, formBaseline } = useDialogFormBaseline({ draft, resolveBaseline: () => initial, resetDeps: [open, initial], track: open });
   const keyUrl = KEY_URLS[draft.base_url];
   const ready = provider !== null && provider.enabled && (provider.api_key_set || isLocal(provider.base_url));
-
-  const loadKey = async (): Promise<string | null> => {
-    if (!provider) return null;
-    if (storedKey !== null) return storedKey;
-    setLoadingKey(true);
-    try {
-      const key = await adminApi.providerKey(provider.id);
-      setStoredKey(key);
-      setDraft((d) => (d.api_key ? d : { ...d, api_key: key }));
-      return key;
-    } catch (e) {
-      setError(errorText(e));
-      return null;
-    } finally {
-      setLoadingKey(false);
-    }
-  };
-
-  const copyKey = async () => {
-    const key = draft.api_key || (await loadKey());
-    if (!key) return;
-    await navigator.clipboard.writeText(key);
-    setCopied(true);
-  };
 
   const test = async () => {
     if (!provider) return;
@@ -229,7 +198,7 @@ function ProviderEditDialog({
           htmlFor="provider-key"
           hint={
             <>
-              {provider?.api_key_set && storedKey === null ? `${tf("apiKeyStored", { hint: provider.api_key_hint })} ` : ""}
+              {provider?.api_key_set ? `${tf("apiKeyStored", { hint: provider.api_key_hint })} ` : ""}
               {keyUrl && (
                 <a href={keyUrl} target="_blank" rel="noreferrer" className={linkClass}>
                   {t("getFreeKey")}
@@ -238,31 +207,21 @@ function ProviderEditDialog({
             </>
           }
         >
-          <VeitPasswordField
-            className={veitInputClass}
+          <VeitSecretField
+            key={provider?.id ?? "new"}
             id="provider-key"
-            autoComplete="off"
             value={draft.api_key}
+            onChange={(v) => set("api_key", v)}
+            stored={provider?.api_key_set ?? false}
+            onReveal={() => adminApi.providerKey(provider!.id)}
+            onRevealError={(e) => setError(errorText(e))}
+            showLabel={t("showKey")}
+            hideLabel={t("hideKey")}
+            copyLabel={t("copy")}
+            copiedLabel={t("copied")}
             disabled={saving}
-            onChange={(e) => set("api_key", e.target.value)}
-            showPasswordLabel={t("showKey")}
-            hidePasswordLabel={t("hideKey")}
           />
         </VeitField>
-        {(draft.api_key || provider?.api_key_set) && (
-          <div className="flex flex-wrap gap-2">
-            {provider?.api_key_set && storedKey === null && (
-              <VeitButton variant="secondary" disabled={saving || loadingKey} onClick={() => void loadKey()}>
-                {loadingKey ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Eye className="size-4" aria-hidden />}
-                {t("loadStoredKey")}
-              </VeitButton>
-            )}
-            <VeitButton variant="secondary" disabled={saving || loadingKey} onClick={() => void copyKey()}>
-              {copied ? <Check className="size-4" aria-hidden /> : <Copy className="size-4" aria-hidden />}
-              {copied ? t("copied") : t("copy")}
-            </VeitButton>
-          </div>
-        )}
         <VeitField label={t("priority")} htmlFor="provider-priority">
           <VeitInput id="provider-priority" inputMode="numeric" value={draft.priority} disabled={saving} onChange={(e) => set("priority", e.target.value)} />
         </VeitField>

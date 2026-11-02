@@ -58,6 +58,7 @@ export const adminApi = {
   voices: async () => (await admin<{ voices: Voice[] }>("/voices")).voices,
 
   settings: async () => (await admin<{ values: Record<string, string | boolean> }>("/settings")).values,
+  settingSecret: async (key: string) => (await admin<{ value: string }>(`/settings/${key}/secret`)).value,
   saveSettings: async (values: Record<string, string>) =>
     (await admin<{ values: Record<string, string | boolean> }>("/settings", "PUT", { values })).values,
 

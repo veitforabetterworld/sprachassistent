@@ -4,7 +4,7 @@ import { z } from "zod";
 import { adminDecision } from "./accounts.js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
-import { listSettings, saveSettings } from "./settings.js";
+import { PASSWORD_SETTINGS, getSetting, listSettings, saveSettings } from "./settings.js";
 
 /** Admin area: settings, AI providers, devices with voice, personality and memory. Admins only. */
 
@@ -97,6 +97,14 @@ export function adminRouter(): Router {
     handle(async (req, res) => {
       await saveSettings(parse(z.record(z.string(), z.string()), req.body?.values));
       res.json({ values: await listSettings() });
+    }),
+  );
+  // A stored password, to show and copy it in the edit dialog.
+  router.get(
+    "/settings/:key/secret",
+    handle(async (req, res) => {
+      const key = parse(z.enum(PASSWORD_SETTINGS), req.params.key);
+      res.set("Cache-Control", "no-store").json({ value: (await getSetting(key)) ?? "" });
     }),
   );
 
