@@ -70,7 +70,7 @@ pnpm install && pnpm build:deps
 docker run -d --name sa-pg -e POSTGRES_PASSWORD=sprachassistent -e POSTGRES_USER=sprachassistent -p 5432:5432 postgres:17
 cp .env.example .env
 pnpm dev:api        # Web-API :3022
-pnpm dev:web        # Adminbereich :5173 (Proxy auf :3020 und :3022)
+pnpm dev:web        # Adminbereich :5183 (Proxy auf :3020 und :3022)
 cargo run           # Sprachserver :3020 (Linux; ohne Modelle: --no-default-features)
 ```
 
@@ -80,6 +80,16 @@ Tests (Postgres nötig, ohne `TEST_DATABASE_URL` werden die API-Tests übersprun
 TEST_DATABASE_URL=postgres://… cargo test --no-default-features
 pnpm typecheck
 ```
+
+## Code-Standards
+
+Wie in Hochwasserdienst; der Pre-Commit-Hook (`pnpm install` richtet ihn ein) und die CI brechen bei Verstößen ab.
+
+- **Nur Framework-Bausteine:** keine nativen `button`/`input`/`select`/`textarea`, kein `style=`, keine eigenen CSS-Dateien, keine Arbitrary Values und Palettenfarben in Tailwind-Klassen (`veit-framework/scripts/no-custom-css.mjs`). Radix und `VeitDialog` nur über die Veit-Presets, keine `alert`/`confirm` (ESLint).
+- **Bearbeiten im Popup:** `VeitOverlayEditDialog` mit Draft (`useDialogFormBaseline`), Löschen über `deleteAction` im Footer. Klickbare Zeilen sind `VeitListItem`; Dialoge bleiben eingebunden und schalten nur `open`.
+- **Texte:** alles Sichtbare kommt aus `apps/web/src/i18n` (de und en mit gleichen Schlüsseln), Datum über `@veit/intl` (`check-i18n-literals.mjs`, `check-i18n-hardcodes.mjs`).
+- **Seiten unter 1000 Zeilen** (`check-page-loc.mjs`).
+- `pnpm lint` (ESLint mit React-Hooks), `pnpm check:secrets`, `pnpm check:submodules` (Framework-Pin auf `origin/development`), `pnpm check:audit`; Rust: `cargo fmt --check` und `cargo clippy -- -D warnings`.
 
 ## Build für den Pi
 

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { pool } from "./db.js";
 
 /** Generated once, used by the server only and never sent to the browser. */
-const SECRET_KEYS = ["api_key_pepper", "auth_mfa_key"] as const;
+const SECRET_KEYS = ["api_key_pepper", "api_key_secret", "auth_mfa_key"] as const;
 /** Write-only in the admin area: GET says whether they are set, an empty value on PUT keeps them. */
 export const PASSWORD_SETTINGS = ["smtp_password"] as const;
 

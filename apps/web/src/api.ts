@@ -1,12 +1,15 @@
 import { createAuthProvider, createRestAuthClient, useAuth, veitFetchJson, VeitApiError, type VeitWireUser } from "@veit/react-auth";
 import { createRestAccountClient } from "@veit/react-account";
 import { createRestApiKeysClient } from "@veit/react-api-keys";
+import { formatLocalizedDateTime } from "@veit/intl";
+import { getActiveLocale } from "./i18n/locale";
+import { trFormat } from "./i18n/translate";
 
 /** Signed-in user as apps/api sends it (@veit/auth-server) plus the admin flag. */
 export type AccountUser = VeitWireUser & { is_admin: boolean };
 
 export const authClient = createRestAuthClient<AccountUser>("/v1", (wire) => wire as AccountUser);
-export const accountClient = createRestAccountClient("/v1", veitFetchJson, (iso) => new Date(iso).toLocaleString("de-DE"));
+export const accountClient = createRestAccountClient("/v1", veitFetchJson, (iso) => formatLocalizedDateTime(getActiveLocale(), iso));
 export const apiKeysClient = createRestApiKeysClient("/v1", veitFetchJson);
 export const AuthProvider = createAuthProvider<AccountUser>(authClient);
 
@@ -62,6 +65,7 @@ export const adminApi = {
   createProvider: (input: ProviderInput) => admin<Provider>("/providers", "POST", input),
   updateProvider: (id: string, input: ProviderInput) => admin<Provider>(`/providers/${id}`, "PUT", input),
   deleteProvider: (id: string) => admin<null>(`/providers/${id}`, "DELETE"),
+  providerKey: async (id: string) => (await admin<{ key: string }>(`/providers/${id}/key`)).key,
   testProvider: (id: string) =>
     admin<{ ok: boolean; reply?: string; error?: string; ms: number }>(`/providers/${id}/test`, "POST", {}),
 
@@ -87,7 +91,7 @@ export async function speakUrl(deviceId: string, text: string): Promise<string> 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
   });
-  if (!res.ok) throw new Error(`Sprachausgabe: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(trFormat("speechError", { status: res.status }));
   // The voice server streams a WAV of unknown length; browsers play it once the sizes are filled in.
   const wav = new Uint8Array(await res.arrayBuffer());
   const view = new DataView(wav.buffer);

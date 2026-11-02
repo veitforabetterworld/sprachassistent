@@ -1,23 +1,39 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ForgotPasswordForm, LoginForm, RegisterForm, ResetPasswordForm, VerifyEmailView, veitAuthErrorText, veitAuthT, veitFetchJson } from "@veit/react-auth";
 import { VeitSettingsToggleRow } from "@veit/react-controls";
 import { authClient, useAccount, type AccountUser } from "../api";
+import { useI18n } from "../i18n/I18nProvider";
+import { linkClass, LocaleSwitch } from "./Layout";
 
-/** Pages around the account forms of @veit/react-auth; texts come from the framework. */
+/** Pages around the account forms of @veit/react-auth; texts come from the framework, links and brand from here. */
 
-const t = veitAuthT("de");
-const parseError = (error: unknown) => veitAuthErrorText(error, t);
 const AFTER_LOGIN = "/admin";
 
+function useAuthTexts() {
+  const { locale } = useI18n();
+  return useMemo(() => {
+    const t = veitAuthT(locale);
+    return { t, parseError: (error: unknown) => veitAuthErrorText(error, t) };
+  }, [locale]);
+}
+
 function Brand() {
-  return <strong className="text-xl">Sprachassistent</strong>;
+  const { t } = useI18n();
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <strong className="text-xl font-bold">{t("appName")}</strong>
+      <LocaleSwitch />
+    </div>
+  );
 }
 
 function FooterLink({ to, label }: { to: string; label: string }) {
   return (
     <p className="mt-4 text-center text-sm">
-      <Link to={to}>{label}</Link>
+      <Link to={to} className={linkClass}>
+        {label}
+      </Link>
     </p>
   );
 }
@@ -34,6 +50,8 @@ function useRegistrationOpen(): boolean {
 }
 
 export function LoginPage() {
+  const { t, parseError } = useAuthTexts();
+  const { t: tr } = useI18n();
   const registrationOpen = useRegistrationOpen();
   return (
     <LoginForm<AccountUser>
@@ -48,7 +66,7 @@ export function LoginPage() {
       renderFooter={() => (
         <>
           <FooterLink to="/passwort-vergessen" label={t("auth.forgot_password")} />
-          {registrationOpen && <FooterLink to="/registrieren" label="Konto anlegen (erstes Konto wird Admin)" />}
+          {registrationOpen && <FooterLink to="/registrieren" label={tr("registerFirstAdmin")} />}
         </>
       )}
     />
@@ -56,6 +74,8 @@ export function LoginPage() {
 }
 
 export function RegisterPage() {
+  const { t, parseError } = useAuthTexts();
+  const { t: tr } = useI18n();
   return (
     <RegisterForm<AccountUser>
       t={t}
@@ -64,31 +84,29 @@ export function RegisterPage() {
       onSuggestPassword={() => authClient.suggestPassword()}
       renderLogo={() => <Brand />}
       renderPrivacyConsent={(checked, onCheckedChange) => (
-        <VeitSettingsToggleRow
-          variant="embed"
-          label="Ich bin einverstanden, dass Name und E-Mail für das Konto gespeichert werden."
-          checked={checked}
-          onCheckedChange={onCheckedChange}
-        />
+        <VeitSettingsToggleRow variant="embed" label={tr("privacyConsent")} checked={checked} onCheckedChange={onCheckedChange} />
       )}
-      renderFooter={() => <FooterLink to="/anmelden" label="Schon ein Konto? Anmelden" />}
+      renderFooter={() => <FooterLink to="/anmelden" label={tr("haveAccount")} />}
     />
   );
 }
 
 export function ForgotPasswordPage() {
+  const { t, parseError } = useAuthTexts();
+  const { t: tr } = useI18n();
   return (
     <ForgotPasswordForm<AccountUser>
       t={t}
       parseError={parseError}
       onRequestReset={(email) => authClient.requestPasswordReset!(email)}
       renderLogo={() => <Brand />}
-      renderFooter={() => <FooterLink to="/anmelden" label="Zurück zur Anmeldung" />}
+      renderFooter={() => <FooterLink to="/anmelden" label={tr("backToLogin")} />}
     />
   );
 }
 
 export function ResetPasswordPage() {
+  const { t, parseError } = useAuthTexts();
   return (
     <ResetPasswordForm
       t={t}
@@ -100,6 +118,8 @@ export function ResetPasswordPage() {
 }
 
 export function VerifyEmailPage() {
+  const { t } = useAuthTexts();
+  const { t: tr } = useI18n();
   const { user, refreshUser } = useAccount();
   return (
     <VerifyEmailView
@@ -109,7 +129,11 @@ export function VerifyEmailPage() {
         await refreshUser();
       }}
       renderLogo={() => <Brand />}
-      renderAction={() => <Link to={user ? "/konto" : "/anmelden"}>{user ? "Zum Konto" : "Zur Anmeldung"}</Link>}
+      renderAction={() => (
+        <Link to={user ? "/konto" : "/anmelden"} className={linkClass}>
+          {user ? tr("toAccount") : tr("toLogin")}
+        </Link>
+      )}
     />
   );
 }

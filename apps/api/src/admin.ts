@@ -143,6 +143,15 @@ export function adminRouter(): Router {
       res.status(204).end();
     }),
   );
+  // The stored key, to show and copy it in the edit dialog.
+  router.get(
+    "/providers/:id/key",
+    handle(async (req, res) => {
+      const row = await pool.query<{ api_key: string }>(`SELECT api_key FROM llm_providers WHERE id = $1`, [parse(uuid, req.params.id)]);
+      if (!row.rows[0]) throw new HttpError(404, "Anbieter nicht gefunden");
+      res.set("Cache-Control", "no-store").json({ key: row.rows[0].api_key });
+    }),
+  );
   router.post(
     "/providers/:id/test",
     handle((req, res) => toVoice(res, `/internal/providers/${parse(uuid, req.params.id)}/test`, { method: "POST", body: {} })),

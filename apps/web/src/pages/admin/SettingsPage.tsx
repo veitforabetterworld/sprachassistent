@@ -9,54 +9,61 @@ import {
   VeitSettingsSection,
   VeitSettingsToggleRow,
   VeitStatusBadge,
+  veitInputClass,
 } from "@veit/react-controls";
 import { VeitOverlayEditDialog, useDialogFormBaseline, useManagedOverlayDialogBinding } from "@veit/react-dialog";
 import { adminApi, errorText } from "../../api";
+import type { MessageKey } from "../../i18n/de";
+import { useI18n } from "../../i18n/I18nProvider";
 
 type Values = Record<string, string | boolean>;
+type Tf = (key: MessageKey, values: Record<string, string | number>) => string;
+type T = (key: MessageKey) => string;
 
 type Field =
-  | { key: string; label: string; kind: "text"; hint?: string }
-  | { key: string; label: string; kind: "toggle"; hint?: string }
+  | { key: string; label: MessageKey; kind: "text"; hint?: MessageKey }
+  | { key: string; label: MessageKey; kind: "toggle"; hint?: MessageKey }
   /** Write-only: the API only says whether it is set (`<key>_set`). */
-  | { key: string; label: string; kind: "password"; hint?: string };
+  | { key: string; label: MessageKey; kind: "password"; hint?: MessageKey };
 
-type Group = { id: string; title: string; description: string; fields: Field[]; summary: (v: Values) => string };
+type Group = { id: string; title: MessageKey; description: MessageKey; fields: Field[]; summary: (v: Values, t: T, tf: Tf) => string };
 
 const GROUPS: Group[] = [
   {
     id: "accounts",
-    title: "Konten",
-    description: "Neue Konten haben keinen Adminzugang; Admins bekommen das Recht in der Datenbank (users.is_admin).",
-    fields: [{ key: "registration_open", label: "Registrierung offen", kind: "toggle" }],
-    summary: (v) => (v.registration_open === "1" ? "Registrierung offen" : "Registrierung geschlossen"),
+    title: "accountsTitle",
+    description: "accountsHint",
+    fields: [{ key: "registration_open", label: "registrationOpen", kind: "toggle" }],
+    summary: (v, t) => (v.registration_open === "1" ? t("registrationOpen") : t("registrationClosed")),
   },
   {
     id: "smtp",
-    title: "E-Mail (SMTP)",
-    description: "Für Passwort-Zurücksetzen, E-Mail-Bestätigung und Codes bei der Anmeldung.",
+    title: "smtpTitle",
+    description: "smtpHint",
     fields: [
-      { key: "smtp_host", label: "Server", kind: "text" },
-      { key: "smtp_port", label: "Port", kind: "text" },
-      { key: "smtp_secure", label: "TLS ab Verbindungsbeginn (Port 465)", kind: "toggle" },
-      { key: "smtp_user", label: "Benutzer", kind: "text" },
-      { key: "smtp_password", label: "Passwort", kind: "password" },
-      { key: "smtp_from", label: "Absender", kind: "text", hint: "z. B. Sprachassistent <assistent@example.de>" },
+      { key: "smtp_host", label: "smtpHost", kind: "text" },
+      { key: "smtp_port", label: "smtpPort", kind: "text" },
+      { key: "smtp_secure", label: "smtpSecure", kind: "toggle" },
+      { key: "smtp_user", label: "smtpUser", kind: "text" },
+      { key: "smtp_password", label: "smtpPassword", kind: "password" },
+      { key: "smtp_from", label: "smtpFrom", kind: "text", hint: "smtpFromHint" },
     ],
-    summary: (v) => (v.smtp_host ? `${v.smtp_host}:${v.smtp_port} · ${v.smtp_from || "kein Absender"}` : "nicht eingerichtet"),
+    summary: (v, t, tf) =>
+      v.smtp_host ? tf("smtpSummary", { host: String(v.smtp_host), port: String(v.smtp_port), from: String(v.smtp_from || t("smtpNoFrom")) }) : t("notConfigured"),
   },
   {
     id: "speech",
-    title: "Spracherkennung und -ausgabe",
-    description: "Wird nach einem Neustart des Sprachservers wirksam (pm2 restart sprachassistent-voice).",
+    title: "speechTitle",
+    description: "speechHint",
     fields: [
-      { key: "whisper_model", label: "Whisper-Modell", kind: "text", hint: "Pfad relativ zum Projekt, z. B. models/whisper/ggml-small-q5_1.bin" },
-      { key: "whisper_language", label: "Sprache", kind: "text", hint: "de, en, …" },
-      { key: "whisper_threads", label: "Threads Spracherkennung", kind: "text" },
-      { key: "whisper_beam_size", label: "Beam-Größe", kind: "text", hint: "1 = am schnellsten" },
-      { key: "tts_threads", label: "Threads Sprachausgabe", kind: "text" },
+      { key: "whisper_model", label: "whisperModel", kind: "text", hint: "whisperModelHint" },
+      { key: "whisper_language", label: "whisperLanguage", kind: "text", hint: "whisperLanguageHint" },
+      { key: "whisper_threads", label: "whisperThreads", kind: "text" },
+      { key: "whisper_beam_size", label: "whisperBeam", kind: "text", hint: "whisperBeamHint" },
+      { key: "tts_threads", label: "ttsThreads", kind: "text" },
     ],
-    summary: (v) => `${String(v.whisper_model).split("/").pop()} · ${v.whisper_language} · ${v.whisper_threads} Threads`,
+    summary: (v, _t, tf) =>
+      tf("speechSummary", { model: String(v.whisper_model).split("/").pop() ?? "", language: String(v.whisper_language), threads: String(v.whisper_threads) }),
   },
 ];
 
@@ -77,6 +84,7 @@ function SettingsEditDialog({
   onClose: () => void;
   onSaved: (values: Values) => void;
 }) {
+  const { t } = useI18n();
   const binding = useManagedOverlayDialogBinding(open, onClose);
   const initial = useMemo(() => draftOf(group, values), [group, values]);
   const [draft, setDraft] = useState(initial);
@@ -106,22 +114,22 @@ function SettingsEditDialog({
   return (
     <VeitOverlayEditDialog
       binding={binding}
-      title={group.title}
-      closeAriaLabel="Schließen"
+      title={t(group.title)}
+      closeAriaLabel={t("close")}
       variant="responsive"
       size="sm"
       disabled={saving}
       blockBackdropClose={saving}
-      footerProps={{ busy: saving, dirty, formBaseline, cancelLabel: "Abbrechen", saveLabel: "Speichern", onSave: save }}
+      footerProps={{ busy: saving, dirty, formBaseline, cancelLabel: t("cancel"), saveLabel: t("save"), onSave: save }}
     >
       <div className="flex flex-col gap-4">
-        <p className="m-0 text-sm text-muted-foreground">{group.description}</p>
+        <p className="m-0 text-sm text-muted-foreground">{t(group.description)}</p>
         {group.fields.map((f) =>
           f.kind === "toggle" ? (
             <VeitSettingsToggleRow
               key={f.key}
               variant="embed"
-              label={f.label}
+              label={t(f.label)}
               checked={draft[f.key] === "1"}
               disabled={saving}
               onCheckedChange={(on) => set(f.key, on ? "1" : "0")}
@@ -129,19 +137,20 @@ function SettingsEditDialog({
           ) : (
             <VeitField
               key={f.key}
-              label={f.label}
+              label={t(f.label)}
               htmlFor={f.key}
-              hint={f.kind === "password" && values[`${f.key}_set`] ? "Gesetzt; leer lassen, um es zu behalten." : f.hint}
+              hint={f.kind === "password" && values[`${f.key}_set`] ? t("secretSet") : f.hint && t(f.hint)}
             >
               {f.kind === "password" ? (
                 <VeitPasswordField
+                  className={veitInputClass}
                   id={f.key}
                   autoComplete="off"
                   value={draft[f.key]}
                   disabled={saving}
                   onChange={(e) => set(f.key, e.target.value)}
-                  showPasswordLabel="Passwort zeigen"
-                  hidePasswordLabel="Passwort verbergen"
+                  showPasswordLabel={t("showPassword")}
+                  hidePasswordLabel={t("hidePassword")}
                 />
               ) : (
                 <VeitInput id={f.key} value={draft[f.key]} disabled={saving} onChange={(e) => set(f.key, e.target.value)} />
@@ -160,6 +169,7 @@ function SettingsEditDialog({
 }
 
 export function SettingsPage() {
+  const { t, tf } = useI18n();
   const [values, setValues] = useState<Values | null>(null);
   const [editing, setEditing] = useState<Group | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -176,29 +186,28 @@ export function SettingsPage() {
         </VeitStatusBadge>
       )}
       {values && (
-        <VeitSettingsSection title="Einstellungen" description="Klicken zum Bearbeiten.">
+        <VeitSettingsSection title={t("settingsTitle")} description={t("settingsHint")}>
           <VeitList>
             {GROUPS.map((g) => (
               <VeitListItem
                 key={g.id}
-                title={g.title}
-                meta={g.summary(values)}
-                trailing={<ChevronRight className="h-4 w-4 text-muted-foreground" aria-hidden />}
+                title={t(g.title)}
+                meta={g.summary(values, t, tf)}
+                trailing={<ChevronRight className="size-4 text-muted-foreground" aria-hidden />}
                 onClick={() => setEditing(g)}
               />
             ))}
           </VeitList>
         </VeitSettingsSection>
       )}
-      {values && editing && (
-        <SettingsEditDialog
-          open
-          group={editing}
-          values={values}
-          onClose={() => setEditing(null)}
-          onSaved={(saved) => setValues(saved)}
-        />
-      )}
+      {/* Stays mounted; the overlay keeps its place in the history while open toggles. */}
+      <SettingsEditDialog
+        open={values !== null && editing !== null}
+        group={editing ?? GROUPS[0]}
+        values={values ?? {}}
+        onClose={() => setEditing(null)}
+        onSaved={(saved) => setValues(saved)}
+      />
     </div>
   );
 }

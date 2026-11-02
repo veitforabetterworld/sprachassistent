@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "node scripts/no-custom-css.mjs && node scripts/check-page-loc.mjs && node scripts/check-i18n-hardcodes.mjs && node scripts/check-i18n-literals.mjs && node scripts/check-sheet-dismiss.mjs && tsc -b --noEmit",
+    "lint": "eslint src"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.16",
@@ -20,13 +21,18 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.1.1",
-    "tailwindcss": "^4.1.16"
+    "tailwindcss": "^4.1.16",
+    "@veit/intl": "workspace:*"
   },
   "devDependencies": {
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.7.2",
-    "vite": "^6.0.6"
+    "vite": "^6.0.6",
+    "@eslint/js": "^9.17.0",
+    "eslint": "^9.17.0",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "typescript-eslint": "^8.18.0"
   }
 }

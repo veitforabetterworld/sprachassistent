@@ -14,6 +14,6 @@ export default defineConfig({
   resolve: {
     dedupe: ["react", "react-dom", "react-router-dom"],
   },
-  server: { port: 5173, strictPort: true, proxy },
-  preview: { port: 4173, strictPort: true, proxy },
+  server: { port: 5183, strictPort: true, proxy },
+  preview: { port: 4183, strictPort: true, proxy },
 });

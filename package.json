@@ -3,23 +3,36 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "preinstall": "node scripts/only-pnpm.cjs",
+    "prepare": "node scripts/install-git-hooks.mjs",
     "build": "pnpm -r --filter @sprachassistent/api --filter @sprachassistent/web run build",
     "build:deps": "pnpm --filter @veit/db --filter @veit/auth-server --filter @veit/api-keys --filter @veit/password-policy --filter @veit/intl run build",
     "typecheck": "pnpm -r --filter @sprachassistent/api --filter @sprachassistent/web run typecheck",
     "dev:api": "pnpm --filter @sprachassistent/api dev",
-    "dev:web": "pnpm --filter @sprachassistent/web dev"
+    "dev:web": "pnpm --filter @sprachassistent/web dev",
+    "lint": "pnpm -r --filter @sprachassistent/api --filter @sprachassistent/web run lint",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "check:submodules": "node veit-framework/scripts/check-submodule-pins.mjs --submodule veit-framework --branch development",
+    "check:audit": "node scripts/check-audit.mjs"
   },
   "engines": {
     "node": ">=22"
   },
   "packageManager": "pnpm@10.33.2",
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"],
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ],
     "overrides": {
       "react": "^19.0.0",
       "react-dom": "^19.0.0",
       "@types/react": "^19.0.2",
       "@types/react-dom": "^19.0.2"
     }
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "eslint": "^9.17.0",
+    "typescript-eslint": "^8.18.0"
   }
 }

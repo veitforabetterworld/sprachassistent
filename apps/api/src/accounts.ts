@@ -22,10 +22,12 @@ export const KEY_PREFIX = "spa";
 
 let mfaKey = "";
 let pepper = "";
+let keySecret = "";
 
 export async function ensureAccountSecrets(): Promise<void> {
   mfaKey = await ensureSecret("auth_mfa_key");
   pepper = await ensureSecret("api_key_pepper");
+  keySecret = await ensureSecret("api_key_secret");
 }
 
 async function smtpSettings() {
@@ -83,6 +85,8 @@ export const apiKeyService = new ApiKeyService({
   permissions: [DEVICE_TALK],
   prefix: KEY_PREFIX,
   pepper: () => pepper,
+  // ESP keys stay revealable, so they can be copied into a device again later.
+  secret: () => keySecret,
   // Only admins may hand out keys, and only for existing devices.
   foreignResources: async (userId, resources) => {
     if (!(await isAdmin(userId))) return resources;

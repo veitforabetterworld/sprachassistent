@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, ChevronRight, Copy, Eye, Loader2 } from "lucide-react";
 import {
   VeitButton,
   VeitField,
@@ -10,12 +11,16 @@ import {
   VeitSettingsSection,
   VeitSettingsToggleRow,
   VeitStatusBadge,
+  veitInputClass,
 } from "@veit/react-controls";
 import { VeitOverlayEditDialog, useDialogFormBaseline, useManagedOverlayDialogBinding } from "@veit/react-dialog";
 import { adminApi, errorText, type Provider, type ProviderInput } from "../../api";
+import type { MessageKey } from "../../i18n/de";
+import { useI18n } from "../../i18n/I18nProvider";
+import { linkClass } from "../Layout";
 
-/** OpenAI-compatible endpoints with a free tier (or local). */
-const PRESETS: Record<string, ProviderInput & { keyUrl?: string }> = {
+/** OpenAI-compatible endpoints with a free tier (or local). `nameKey` names a preset whose name is text. */
+const PRESETS: Record<string, ProviderInput & { keyUrl?: string; nameKey?: MessageKey }> = {
   groq: {
     name: "Groq",
     base_url: "https://api.groq.com/openai/v1",
@@ -26,7 +31,7 @@ const PRESETS: Record<string, ProviderInput & { keyUrl?: string }> = {
     keyUrl: "https://console.groq.com/keys",
   },
   gemini: {
-    name: "Google Gemini",
+    name: "Google Gemini", // i18n-ignore: product name
     base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
     model: "gemini-2.5-flash-lite",
     api_key: "",
@@ -44,7 +49,8 @@ const PRESETS: Record<string, ProviderInput & { keyUrl?: string }> = {
     keyUrl: "https://openrouter.ai/keys",
   },
   ollama: {
-    name: "Ollama (lokal)",
+    name: "Ollama",
+    nameKey: "presetOllama",
     base_url: "http://127.0.0.1:11434/v1",
     model: "qwen2.5:3b",
     api_key: "",
@@ -80,20 +86,72 @@ function ProviderEditDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const { t, tf } = useI18n();
+  const presetName = (key: string) => (PRESETS[key].nameKey ? t(PRESETS[key].nameKey!) : PRESETS[key].name);
+  const fromPreset = (key: string) => toDraft({ ...PRESETS[key], name: presetName(key) });
   const binding = useManagedOverlayDialogBinding(open, onClose);
-  const initial = useMemo(() => toDraft(provider ? { ...provider, api_key: "" } : PRESETS.groq), [provider]);
+  const initial = useMemo(() => (provider ? toDraft({ ...provider, api_key: "" }) : toDraft(PRESETS.groq)), [provider]);
   const [draft, setDraft] = useState<Draft>(initial);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [testing, setTesting] = useState(false);
+  /** The stored key once shown; it becomes part of the baseline, so showing it does not count as a change. */
+  const [storedKey, setStoredKey] = useState<string | null>(null);
+  const [loadingKey, setLoadingKey] = useState(false);
+  const [copied, setCopied] = useState(false);
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }));
   useEffect(() => {
     if (open) {
       setDraft(initial);
       setError(null);
+      setTestResult(null);
+      setStoredKey(null);
+      setCopied(false);
     }
   }, [open, initial]);
-  const { dirty, formBaseline } = useDialogFormBaseline({ draft, resolveBaseline: () => initial, resetDeps: [open, initial], track: open });
+  const baseline = useMemo(() => (storedKey === null ? initial : { ...initial, api_key: storedKey }), [initial, storedKey]);
+  const { dirty, formBaseline } = useDialogFormBaseline({ draft, resolveBaseline: () => baseline, resetDeps: [open, baseline], track: open });
   const keyUrl = KEY_URLS[draft.base_url];
+  const ready = provider !== null && provider.enabled && (provider.api_key_set || isLocal(provider.base_url));
+
+  const loadKey = async (): Promise<string | null> => {
+    if (!provider) return null;
+    if (storedKey !== null) return storedKey;
+    setLoadingKey(true);
+    try {
+      const key = await adminApi.providerKey(provider.id);
+      setStoredKey(key);
+      setDraft((d) => (d.api_key ? d : { ...d, api_key: key }));
+      return key;
+    } catch (e) {
+      setError(errorText(e));
+      return null;
+    } finally {
+      setLoadingKey(false);
+    }
+  };
+
+  const copyKey = async () => {
+    const key = draft.api_key || (await loadKey());
+    if (!key) return;
+    await navigator.clipboard.writeText(key);
+    setCopied(true);
+  };
+
+  const test = async () => {
+    if (!provider) return;
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const r = await adminApi.testProvider(provider.id);
+      setTestResult(r.ok ? { ok: true, text: tf("testReply", { reply: r.reply ?? "", ms: r.ms }) } : { ok: false, text: r.error ?? t("error") });
+    } catch (e) {
+      setTestResult({ ok: false, text: errorText(e) });
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const save = async () => {
     const input: ProviderInput = { ...draft, priority: Number(draft.priority) || 0 };
@@ -113,8 +171,8 @@ function ProviderEditDialog({
   return (
     <VeitOverlayEditDialog
       binding={binding}
-      title={provider ? `${provider.name} bearbeiten` : "Neuer KI-Anbieter"}
-      closeAriaLabel="Schließen"
+      title={provider ? tf("editProvider", { name: provider.name }) : t("newProvider")}
+      closeAriaLabel={t("close")}
       variant="responsive"
       size="sm"
       disabled={saving}
@@ -124,17 +182,17 @@ function ProviderEditDialog({
         dirty,
         formBaseline,
         saveRequiresDirty: provider !== null,
-        cancelLabel: "Abbrechen",
-        saveLabel: provider ? "Speichern" : "Hinzufügen",
+        cancelLabel: t("cancel"),
+        saveLabel: provider ? t("save") : t("add"),
         onSave: save,
         deleteAction: provider
           ? {
-              ariaLabel: "Anbieter löschen",
+              ariaLabel: t("deleteProvider"),
               confirm: {
-                title: "Anbieter löschen?",
-                message: `${provider.name} wird entfernt. Geräte, die ihn bevorzugen, nutzen dann die anderen.`,
-                confirmLabel: "Löschen",
-                cancelLabel: "Abbrechen",
+                title: t("deleteProviderTitle"),
+                message: tf("deleteProviderText", { name: provider.name }),
+                confirmLabel: t("delete"),
+                cancelLabel: t("cancel"),
                 destructive: true,
               },
               onDelete: async () => {
@@ -147,53 +205,83 @@ function ProviderEditDialog({
     >
       <div className="flex flex-col gap-4">
         {!provider && (
-          <VeitField label="Vorlage" htmlFor="provider-preset">
+          <VeitField label={t("preset")} htmlFor="provider-preset">
             <VeitSelect
               id="provider-preset"
-              placeholder="Vorlage wählen"
+              placeholder={t("presetChoose")}
               disabled={saving}
-              onValueChange={(value) => setDraft(toDraft(PRESETS[value]))}
-              options={Object.entries(PRESETS).map(([value, p]) => ({ value, label: p.name }))}
+              onValueChange={(value) => setDraft(fromPreset(value))}
+              options={Object.keys(PRESETS).map((value) => ({ value, label: presetName(value) }))}
             />
           </VeitField>
         )}
-        <VeitField label="Name" htmlFor="provider-name">
+        <VeitField label={t("name")} htmlFor="provider-name">
           <VeitInput id="provider-name" value={draft.name} disabled={saving} onChange={(e) => set("name", e.target.value)} />
         </VeitField>
-        <VeitField label="Adresse (OpenAI-kompatibel)" htmlFor="provider-url">
+        <VeitField label={t("baseUrl")} htmlFor="provider-url">
           <VeitInput id="provider-url" value={draft.base_url} disabled={saving} onChange={(e) => set("base_url", e.target.value)} />
         </VeitField>
-        <VeitField label="Modell" htmlFor="provider-model">
+        <VeitField label={t("model")} htmlFor="provider-model">
           <VeitInput id="provider-model" value={draft.model} disabled={saving} onChange={(e) => set("model", e.target.value)} />
         </VeitField>
         <VeitField
-          label="API-Key"
+          label={t("apiKey")}
           htmlFor="provider-key"
           hint={
             <>
-              {provider?.api_key_set ? `Gespeichert (${provider.api_key_hint}); leer lassen, um ihn zu behalten. ` : ""}
+              {provider?.api_key_set && storedKey === null ? `${tf("apiKeyStored", { hint: provider.api_key_hint })} ` : ""}
               {keyUrl && (
-                <a href={keyUrl} target="_blank" rel="noreferrer">
-                  Kostenlosen Key holen
+                <a href={keyUrl} target="_blank" rel="noreferrer" className={linkClass}>
+                  {t("getFreeKey")}
                 </a>
               )}
             </>
           }
         >
           <VeitPasswordField
+            className={veitInputClass}
             id="provider-key"
             autoComplete="off"
             value={draft.api_key}
             disabled={saving}
             onChange={(e) => set("api_key", e.target.value)}
-            showPasswordLabel="Key zeigen"
-            hidePasswordLabel="Key verbergen"
+            showPasswordLabel={t("showKey")}
+            hidePasswordLabel={t("hideKey")}
           />
         </VeitField>
-        <VeitField label="Reihenfolge (kleiner = zuerst)" htmlFor="provider-priority">
+        {(draft.api_key || provider?.api_key_set) && (
+          <div className="flex flex-wrap gap-2">
+            {provider?.api_key_set && storedKey === null && (
+              <VeitButton variant="secondary" disabled={saving || loadingKey} onClick={() => void loadKey()}>
+                {loadingKey ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Eye className="size-4" aria-hidden />}
+                {t("loadStoredKey")}
+              </VeitButton>
+            )}
+            <VeitButton variant="secondary" disabled={saving || loadingKey} onClick={() => void copyKey()}>
+              {copied ? <Check className="size-4" aria-hidden /> : <Copy className="size-4" aria-hidden />}
+              {copied ? t("copied") : t("copy")}
+            </VeitButton>
+          </div>
+        )}
+        <VeitField label={t("priority")} htmlFor="provider-priority">
           <VeitInput id="provider-priority" inputMode="numeric" value={draft.priority} disabled={saving} onChange={(e) => set("priority", e.target.value)} />
         </VeitField>
-        <VeitSettingsToggleRow variant="embed" label="Aktiv" checked={draft.enabled} disabled={saving} onCheckedChange={(v) => set("enabled", v)} />
+        <VeitSettingsToggleRow variant="embed" label={t("enabled")} checked={draft.enabled} disabled={saving} onCheckedChange={(v) => set("enabled", v)} />
+        {provider && (
+          <VeitField label={t("connection")} hint={dirty ? t("connectionHint") : undefined}>
+            <div className="flex flex-col items-start gap-2">
+              <VeitButton variant="secondary" disabled={saving || testing || !ready} onClick={() => void test()}>
+                {testing && <Loader2 className="size-4 animate-spin" aria-hidden />}
+                {t("test")}
+              </VeitButton>
+              {testResult && (
+                <VeitStatusBadge variant={testResult.ok ? "success" : "destructive"} shape="rounded">
+                  {testResult.text}
+                </VeitStatusBadge>
+              )}
+            </div>
+          </VeitField>
+        )}
         {error && (
           <VeitStatusBadge variant="destructive" shape="rounded">
             {error}
@@ -204,55 +292,33 @@ function ProviderEditDialog({
   );
 }
 
-function ProviderRow({ provider, onEdit }: { provider: Provider; onEdit: () => void }) {
-  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const [busy, setBusy] = useState(false);
+/** A provider; a click opens the dialog to show, test, edit and delete it. */
+function ProviderRow({ provider, onClick }: { provider: Provider; onClick: () => void }) {
+  const { t, tf } = useI18n();
   const ready = provider.enabled && (provider.api_key_set || isLocal(provider.base_url));
-
-  const test = async () => {
-    setBusy(true);
-    setResult(null);
-    try {
-      const r = await adminApi.testProvider(provider.id);
-      setResult(r.ok ? { ok: true, text: `„${r.reply}“ in ${r.ms} ms` } : { ok: false, text: r.error ?? "Fehler" });
-    } catch (e) {
-      setResult({ ok: false, text: errorText(e) });
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <VeitListItem
       title={provider.name}
-      meta={`${provider.model} · Reihenfolge ${provider.priority}`}
+      meta={tf("providerMeta", { model: provider.model, priority: provider.priority })}
       badge={
         <VeitStatusBadge variant={!provider.enabled ? "inactive" : ready ? "success" : "warning"}>
-          {!provider.enabled ? "aus" : provider.api_key_set ? `Key ${provider.api_key_hint}` : isLocal(provider.base_url) ? "lokal" : "Key fehlt"}
+          {!provider.enabled
+            ? t("providerOff")
+            : provider.api_key_set
+              ? tf("providerKey", { hint: provider.api_key_hint })
+              : isLocal(provider.base_url)
+                ? t("providerLocal")
+                : t("providerKeyMissing")}
         </VeitStatusBadge>
       }
-      footer={
-        result && (
-          <VeitStatusBadge variant={result.ok ? "success" : "destructive"} shape="rounded">
-            {result.text}
-          </VeitStatusBadge>
-        )
-      }
-      actions={
-        <div className="flex gap-2">
-          <VeitButton type="button" variant="secondary" className="btn-sm" disabled={busy || !ready} onClick={() => void test()}>
-            Testen
-          </VeitButton>
-          <VeitButton type="button" variant="secondary" className="btn-sm" onClick={onEdit}>
-            Bearbeiten
-          </VeitButton>
-        </div>
-      }
+      trailing={<ChevronRight className="size-4 text-muted-foreground" aria-hidden />}
+      onClick={onClick}
     />
   );
 }
 
 export function ProvidersPage() {
+  const { t } = useI18n();
   const [providers, setProviders] = useState<Provider[] | null>(null);
   const [editing, setEditing] = useState<Provider | "new" | null>(null);
   const reload = useCallback(() => {
@@ -263,16 +329,16 @@ export function ProvidersPage() {
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4 sm:p-6">
       <VeitSettingsSection
-        title="KI-Anbieter"
-        description="Der Sprachserver fragt die aktiven Anbieter mit Key der Reihe nach, bis einer antwortet; ein Gerät kann einen davon bevorzugen. Groq und Gemini haben kostenlose Kontingente, nur der Key muss eingetragen werden."
+        title={t("providersTitle")}
+        description={t("providersHint")}
         actions={
-          <VeitButton type="button" variant="secondary" className="btn-sm" onClick={() => setEditing("new")}>
-            Hinzufügen
+          <VeitButton variant="secondary" onClick={() => setEditing("new")}>
+            {t("add")}
           </VeitButton>
         }
       >
         <VeitList>
-          {providers?.map((p) => <ProviderRow key={p.id} provider={p} onEdit={() => setEditing(p)} />)}
+          {providers?.map((p) => <ProviderRow key={p.id} provider={p} onClick={() => setEditing(p)} />)}
         </VeitList>
       </VeitSettingsSection>
       <ProviderEditDialog

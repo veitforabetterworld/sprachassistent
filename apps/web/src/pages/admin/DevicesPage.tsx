@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import {
+  VEIT_SETTINGS_ACTIONS,
   VeitButton,
   VeitDeleteButton,
-  VeitDeleteIconButton,
   VeitEmptyState,
   VeitField,
   VeitInput,
@@ -14,8 +14,9 @@ import {
   VeitTabBar,
   VeitTextarea,
 } from "@veit/react-controls";
-import { VeitOverlayEditDialog, useDialogFormBaseline, useManagedOverlayDialogBinding } from "@veit/react-dialog";
+import { VeitOverlayDialog, VeitOverlayEditDialog, useDialogFormBaseline, useManagedOverlayDialogBinding } from "@veit/react-dialog";
 import { adminApi, errorText, speakUrl, type Device, type Fact, type Message, type Provider, type Voice } from "../../api";
+import { useI18n } from "../../i18n/I18nProvider";
 import { DeviceEditDialog } from "./DeviceEditDialog";
 
 type Notice = { ok: boolean; text: string } | null;
@@ -29,33 +30,35 @@ function NoticeBadge({ notice }: { notice: Notice }) {
   );
 }
 
+const chevron = <ChevronRight className="size-4 text-muted-foreground" aria-hidden />;
+
 /** Overview of a device; a click opens the edit dialog. */
 function DeviceSummary({ device, voices, providers, onClick }: { device: Device; voices: Voice[]; providers: Provider[]; onClick: () => void }) {
+  const { t, tf } = useI18n();
   const voice = voices.find((v) => v.id === device.voice)?.label ?? device.voice;
-  const provider = providers.find((p) => p.id === device.provider_id)?.name ?? "Standard";
+  const provider = providers.find((p) => p.id === device.provider_id)?.name ?? t("defaultProvider");
   return (
-    <VeitButton
-      variant="ghost"
-      type="button"
-      className="flex w-full items-center gap-3 px-4 py-3 text-left"
-      onClick={onClick}
-    >
-      <div className="min-w-0 flex-1 space-y-1">
-        <p className="truncate text-base font-semibold">{device.name}</p>
-        <p className="truncate text-sm text-muted-foreground">
-          Stimme {voice} · Tempo {device.speed} · KI {provider} · Gedächtnis {device.memory_extraction ? "an" : "aus"}
-        </p>
-        <p className="line-clamp-2 text-sm text-muted-foreground">{device.persona || "Keine Persönlichkeit gesetzt"}</p>
-        <p className="text-xs text-muted-foreground">Geräte-ID: {device.id}</p>
-      </div>
-      <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden />
-    </VeitButton>
+    <VeitList>
+      <VeitListItem
+        title={device.name}
+        meta={
+          <div className="flex flex-col gap-1">
+            <span>{tf("deviceSummary", { voice, speed: device.speed, provider, memory: device.memory_extraction ? t("on") : t("off") })}</span>
+            <span className="line-clamp-2">{device.persona || t("noPersona")}</span>
+            <span>{tf("deviceId", { id: device.id })}</span>
+          </div>
+        }
+        trailing={chevron}
+        onClick={onClick}
+      />
+    </VeitList>
   );
 }
 
 /** Text chat and voice preview with the saved settings of the device. */
 function DeviceTest({ device, onMemoryChanged }: { device: Device; onMemoryChanged: () => void }) {
-  const [text, setText] = useState("Hallo, wer bist du?");
+  const { t, tf } = useI18n();
+  const [text, setText] = useState(() => t("testDefault"));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
   const [audio, setAudio] = useState<string | null>(null);
@@ -68,7 +71,7 @@ function DeviceTest({ device, onMemoryChanged }: { device: Device; onMemoryChang
       let spoken = text;
       if (action === "chat") {
         const r = await adminApi.chat(device.id, text);
-        setNotice({ ok: true, text: `${r.reply} (${r.ms} ms)` });
+        setNotice({ ok: true, text: tf("replyWithTime", { reply: r.reply, ms: r.ms }) });
         onMemoryChanged();
         spoken = r.reply;
       }
@@ -82,17 +85,17 @@ function DeviceTest({ device, onMemoryChanged }: { device: Device; onMemoryChang
   };
 
   return (
-    <VeitSettingsSection title="Testen" description="Antworten gehen ins Gedächtnis des Geräts, wie bei einem echten Gespräch.">
+    <VeitSettingsSection title={t("testTitle")} description={t("testHint")}>
       <div className="flex flex-col gap-4">
-        <VeitField label="Text" htmlFor="device-test">
+        <VeitField label={t("testText")} htmlFor="device-test">
           <VeitTextarea id="device-test" rows={2} value={text} onChange={(e) => setText(e.target.value)} />
         </VeitField>
         <div className="flex flex-wrap gap-2">
-          <VeitButton type="button" disabled={busy || !text.trim()} onClick={() => void run("chat")}>
-            Fragen
+          <VeitButton disabled={busy || !text.trim()} onClick={() => void run("chat")}>
+            {t("ask")}
           </VeitButton>
-          <VeitButton type="button" variant="secondary" disabled={busy || !text.trim()} onClick={() => void run("speak")}>
-            Vorlesen
+          <VeitButton variant="secondary" disabled={busy || !text.trim()} onClick={() => void run("speak")}>
+            {t("readAloud")}
           </VeitButton>
         </div>
         <NoticeBadge notice={notice} />
@@ -116,6 +119,7 @@ function FactEditDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const { t } = useI18n();
   const binding = useManagedOverlayDialogBinding(open, onClose);
   const initial = useMemo(() => ({ content: fact?.content ?? "" }), [fact]);
   const [draft, setDraft] = useState(initial);
@@ -146,8 +150,8 @@ function FactEditDialog({
   return (
     <VeitOverlayEditDialog
       binding={binding}
-      title={fact ? "Fakt bearbeiten" : "Fakt hinzufügen"}
-      closeAriaLabel="Schließen"
+      title={fact ? t("factEdit") : t("factAdd")}
+      closeAriaLabel={t("close")}
       variant="responsive"
       size="sm"
       disabled={saving}
@@ -157,12 +161,19 @@ function FactEditDialog({
         dirty,
         formBaseline,
         saveDisabled: !draft.content.trim(),
-        cancelLabel: "Abbrechen",
-        saveLabel: "Speichern",
+        cancelLabel: t("cancel"),
+        saveLabel: t("save"),
         onSave: save,
         deleteAction: fact
           ? {
-              ariaLabel: "Fakt löschen",
+              ariaLabel: t("factDelete"),
+              confirm: {
+                title: t("factDeleteTitle"),
+                message: fact.content,
+                confirmLabel: t("delete"),
+                cancelLabel: t("cancel"),
+                destructive: true,
+              },
               onDelete: async () => {
                 await adminApi.deleteFact(device.id, fact.id);
                 onSaved();
@@ -172,7 +183,7 @@ function FactEditDialog({
       }}
     >
       <div className="flex flex-col gap-3">
-        <VeitField label="Fakt" htmlFor="fact-content" hint="Kurz, in der dritten Person, z. B. „Trinkt Kaffee schwarz“.">
+        <VeitField label={t("fact")} htmlFor="fact-content" hint={t("factHint")}>
           <VeitInput id="fact-content" value={draft.content} disabled={saving} onChange={(e) => setDraft({ content: e.target.value })} />
         </VeitField>
         {error && <NoticeBadge notice={{ ok: false, text: error }} />}
@@ -181,54 +192,108 @@ function FactEditDialog({
   );
 }
 
+/** One message of the history; deleting sits next to closing. */
+function MessageDialog({
+  device,
+  message,
+  onClose,
+  onDeleted,
+}: {
+  device: Device;
+  message: Message | null;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const { t, formatTime } = useI18n();
+  const binding = useManagedOverlayDialogBinding(message !== null, onClose);
+  return (
+    <VeitOverlayDialog
+      binding={binding}
+      title={message?.role === "user" ? t("messageUserTitle") : t("messageAssistantTitle")}
+      closeAriaLabel={t("close")}
+      variant="responsive"
+      size="sm"
+    >
+      {message && (
+        <div className="flex flex-col gap-4">
+          <p className="m-0 whitespace-pre-wrap text-sm">{message.content}</p>
+          <p className="m-0 text-xs text-muted-foreground">{formatTime(message.created_at)}</p>
+          <div className={VEIT_SETTINGS_ACTIONS}>
+            <VeitDeleteButton
+              deleteConfirm={{
+                title: t("deleteMessageTitle"),
+                message: t("deleteMessageText"),
+                confirmLabel: t("delete"),
+                cancelLabel: t("cancel"),
+                destructive: true,
+              }}
+              onClick={async () => {
+                await adminApi.deleteMessage(device.id, message.id);
+                onDeleted();
+                onClose();
+              }}
+            >
+              {t("delete")}
+            </VeitDeleteButton>
+            <VeitButton variant="secondary" onClick={onClose}>
+              {t("close")}
+            </VeitButton>
+          </div>
+        </div>
+      )}
+    </VeitOverlayDialog>
+  );
+}
+
 function DeviceMemory({ device, version }: { device: Device; version: number }) {
+  const { t, formatTime } = useI18n();
   const [memory, setMemory] = useState<{ facts: Fact[]; messages: Message[] }>({ facts: [], messages: [] });
   const [editing, setEditing] = useState<Fact | "new" | null>(null);
+  const [message, setMessage] = useState<Message | null>(null);
   const reload = useCallback(() => {
     void adminApi.memory(device.id).then(setMemory);
   }, [device.id]);
   useEffect(reload, [reload, version]);
 
-  const clearConfirm = (what: string) => ({
-    title: `${what} löschen?`,
-    message: "Das lässt sich nicht rückgängig machen.",
-    confirmLabel: "Löschen",
-    cancelLabel: "Abbrechen",
+  const clearConfirm = (title: string) => ({
+    title,
+    message: t("cannotUndo"),
+    confirmLabel: t("delete"),
+    cancelLabel: t("cancel"),
     destructive: true,
   });
 
   return (
     <>
       <VeitSettingsSection
-        title="Gedächtnis: Fakten"
-        description="Fließen in jeden Prompt dieses Geräts ein. Klicken zum Bearbeiten."
+        title={t("factsTitle")}
+        description={t("factsHint")}
         actions={
-          <VeitButton type="button" variant="secondary" className="btn-sm" onClick={() => setEditing("new")}>
-            Hinzufügen
+          <VeitButton variant="secondary" onClick={() => setEditing("new")}>
+            {t("add")}
           </VeitButton>
         }
       >
         <div className="flex flex-col gap-3">
           {memory.facts.length === 0 ? (
-            <VeitEmptyState embedded title="Noch keine Fakten" />
+            <VeitEmptyState embedded title={t("noFacts")} />
           ) : (
             <VeitList>
               {memory.facts.map((f) => (
-                <VeitListItem key={f.id} title={f.content} onClick={() => setEditing(f)} trailing={<ChevronRight className="h-4 w-4 text-muted-foreground" aria-hidden />} />
+                <VeitListItem key={f.id} title={f.content} onClick={() => setEditing(f)} trailing={chevron} />
               ))}
             </VeitList>
           )}
           {memory.facts.length > 0 && (
-            <div>
+            <div className={VEIT_SETTINGS_ACTIONS}>
               <VeitDeleteButton
-                type="button"
-                deleteConfirm={clearConfirm("Alle Fakten")}
+                deleteConfirm={clearConfirm(t("clearFactsTitle"))}
                 onClick={async () => {
                   await adminApi.clearMemory(device.id, "facts");
                   reload();
                 }}
               >
-                Alle Fakten löschen
+                {t("clearFacts")}
               </VeitDeleteButton>
             </div>
           )}
@@ -241,51 +306,45 @@ function DeviceMemory({ device, version }: { device: Device; version: number }) 
         onClose={() => setEditing(null)}
         onSaved={reload}
       />
-      <VeitSettingsSection title="Gesprächsverlauf" description="Die letzten 50 Nachrichten.">
+      <VeitSettingsSection title={t("historyTitle")} description={t("historyHint")}>
         <div className="flex flex-col gap-3">
           {memory.messages.length === 0 ? (
-            <VeitEmptyState embedded title="Noch keine Gespräche" />
+            <VeitEmptyState embedded title={t("noHistory")} />
           ) : (
             <VeitList>
               {memory.messages.map((m) => (
                 <VeitListItem
                   key={m.id}
-                  title={m.content}
-                  meta={`${m.role === "user" ? "Nutzer" : "Assistent"} · ${new Date(m.created_at).toLocaleString("de-DE")}`}
-                  trailing={
-                    <VeitDeleteIconButton
-                      label="Nachricht löschen"
-                      onClick={async () => {
-                        await adminApi.deleteMessage(device.id, m.id);
-                        reload();
-                      }}
-                    />
-                  }
+                  title={<span className="line-clamp-2">{m.content}</span>}
+                  meta={`${m.role === "user" ? t("roleUser") : t("roleAssistant")} · ${formatTime(m.created_at)}`}
+                  trailing={chevron}
+                  onClick={() => setMessage(m)}
                 />
               ))}
             </VeitList>
           )}
           {memory.messages.length > 0 && (
-            <div>
+            <div className={VEIT_SETTINGS_ACTIONS}>
               <VeitDeleteButton
-                type="button"
-                deleteConfirm={clearConfirm("Verlauf")}
+                deleteConfirm={clearConfirm(t("clearHistoryTitle"))}
                 onClick={async () => {
                   await adminApi.clearMemory(device.id, "messages");
                   reload();
                 }}
               >
-                Verlauf löschen
+                {t("clearHistory")}
               </VeitDeleteButton>
             </div>
           )}
         </div>
       </VeitSettingsSection>
+      <MessageDialog device={device} message={message} onClose={() => setMessage(null)} onDeleted={reload} />
     </>
   );
 }
 
 export function DevicesPage() {
+  const { t } = useI18n();
   const [devices, setDevices] = useState<Device[] | null>(null);
   const [voices, setVoices] = useState<Voice[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -312,17 +371,17 @@ export function DevicesPage() {
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4 sm:p-6">
       <div className="flex flex-wrap items-center gap-3">
         {devices && devices.length > 0 && (
-          <VeitTabBar ariaLabel="Geräte" value={selected ?? ""} onChange={setSelected} items={devices.map((d) => ({ id: d.id, label: d.name }))} />
+          <VeitTabBar ariaLabel={t("devicesTabs")} value={selected ?? ""} onChange={setSelected} items={devices.map((d) => ({ id: d.id, label: d.name }))} />
         )}
-        <VeitButton type="button" variant="secondary" className="btn-sm" onClick={() => setEditing("new")}>
-          Gerät hinzufügen
+        <VeitButton variant="secondary" onClick={() => setEditing("new")}>
+          {t("addDevice")}
         </VeitButton>
       </div>
       <NoticeBadge notice={notice} />
-      {devices?.length === 0 && <VeitEmptyState title="Noch kein Gerät" description="Lege ein Gerät für deinen ESP an." />}
+      {devices?.length === 0 && <VeitEmptyState title={t("noDeviceTitle")} description={t("noDeviceText")} />}
       {device && (
         <>
-          <VeitSettingsSection title="Gerät">
+          <VeitSettingsSection title={t("deviceSection")}>
             <DeviceSummary device={device} voices={voices} providers={providers} onClick={() => setEditing(device)} />
           </VeitSettingsSection>
           <DeviceTest key={`test-${device.id}`} device={device} onMemoryChanged={() => setMemoryVersion((v) => v + 1)} />

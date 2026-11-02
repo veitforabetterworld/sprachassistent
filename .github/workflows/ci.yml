@@ -43,8 +43,17 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build:deps
-      - run: pnpm typecheck
+      - name: Typecheck (incl. no-custom-css, i18n, page size)
+        run: pnpm typecheck
+      - name: Lint
+        run: pnpm lint
       - run: pnpm build
+      - name: Submodule pins
+        run: pnpm check:submodules
+      - name: Secrets
+        run: pnpm check:secrets
+      - name: Audit
+        run: pnpm check:audit
 
   build-pi:
     runs-on: ubuntu-latest
