@@ -10,7 +10,7 @@ cargo build --release --locked --target "$TARGET"
 rm -rf bin
 mkdir -p bin/lib
 cp "$OUT/sprachassistent" bin/sprachassistent
-# sherpa-rs copies the prebuilt sherpa-onnx libraries next to the binary.
+# sherpa-onnx (feature "shared") copies its prebuilt libraries next to the binary.
 cp -L "$OUT"/libsherpa-onnx-c-api.so "$OUT"/libonnxruntime.so bin/lib/
 
 echo "bin: $(du -sh bin | cut -f1)"

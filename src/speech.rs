@@ -1,17 +1,31 @@
-//! Speech recognition (whisper.cpp) and synthesis (Piper voices via sherpa-onnx), both local.
-//! Both run synchronously on the CPU and are called through `spawn_blocking`.
-
-use anyhow::Result;
+//! Speech recognition (streaming Kroko model) and synthesis (Piper voices), both local through
+//! sherpa-onnx. Both run synchronously on the CPU and are called through `spawn_blocking`.
 
 pub trait SpeechToText: Send + Sync {
-    /// `audio` is 16 kHz mono.
-    fn transcribe(&self, audio: &[f32]) -> Result<String>;
+    /// Starts a recognition that takes the audio while it is still being recorded.
+    fn start(&self) -> Box<dyn Transcription>;
+
+    /// Recognizes a finished recording (16 kHz mono) at once.
+    fn transcribe(&self, audio: &[f32]) -> String {
+        let mut transcription = self.start();
+        transcription.push(audio);
+        transcription.finish()
+    }
+}
+
+/// One running recognition. Each piece is decoded as it arrives, so at the end only the last
+/// moment is left to decode.
+pub trait Transcription: Send {
+    /// 16 kHz mono, pieces of any size.
+    fn push(&mut self, audio: &[f32]);
+    /// The recording has ended: the text of everything pushed.
+    fn finish(self: Box<Self>) -> String;
 }
 
 pub trait TextToSpeech: Send + Sync {
     fn sample_rate(&self) -> u32;
     /// Mono f32 samples at `sample_rate()`; `speed` above 1 speaks faster.
-    fn synthesize(&self, text: &str, speed: f32) -> Result<Vec<f32>>;
+    fn synthesize(&self, text: &str, speed: f32) -> anyhow::Result<Vec<f32>>;
 }
 
 /// The installed voices; each device picks one by id.
@@ -19,7 +33,7 @@ pub trait VoiceBank: Send + Sync {
     /// Ids of the installed voices, sorted.
     fn list(&self) -> Vec<String>;
     /// Loads the voice on first use.
-    fn voice(&self, id: &str) -> Result<std::sync::Arc<dyn TextToSpeech>>;
+    fn voice(&self, id: &str) -> anyhow::Result<std::sync::Arc<dyn TextToSpeech>>;
 }
 
 /// "vits-piper-de_DE-thorsten-medium" -> "thorsten (de_DE, medium)".
@@ -32,148 +46,102 @@ pub fn voice_label(id: &str) -> String {
     }
 }
 
-/// Whisper annotates noise as "[Musik]" or "(Lachen)" and invents subtitle credits from its
-/// training data on silence. Annotations are removed; a credit line drops the whole transcript.
-pub fn clean_transcript(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let (mut depth, mut starred) = (0, false);
-    for c in text.chars() {
-        match c {
-            '[' | '(' => depth += 1,
-            ']' | ')' if depth > 0 => depth -= 1,
-            '*' => starred = !starred,
-            _ if depth == 0 && !starred => out.push(c),
-            _ => {}
-        }
-    }
-    let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
-    if is_hallucination(&out) {
-        String::new()
-    } else {
-        out
-    }
-}
+#[cfg(feature = "speech")]
+pub use sherpa::{KrokoStt, PiperVoices};
 
-fn is_hallucination(text: &str) -> bool {
-    let t = text.to_lowercase();
-    !t.chars().any(char::is_alphanumeric)
-        || [
-            "untertitel",
-            "zdf",
-            "copyright",
-            "vielen dank fürs zuschauen",
-        ]
-        .iter()
-        .any(|h| t.contains(h))
-}
-
-/// Whisper's encoder always works on a 30 s window (1500 frames, 50 per second of audio).
-/// Limiting it to the recording plus a margin makes short questions several times faster.
-#[cfg_attr(not(feature = "whisper"), allow(dead_code))]
-fn audio_ctx(samples_16k: usize) -> i32 {
-    const FRAMES_PER_SECOND: usize = 50;
-    const MARGIN: usize = 128;
-    let frames = samples_16k * FRAMES_PER_SECOND / 16_000 + MARGIN;
-    frames.min(1500) as i32
-}
-
-#[cfg(feature = "whisper")]
-pub use whisper::WhisperStt;
-
-#[cfg(feature = "whisper")]
-mod whisper {
-    use std::path::Path;
-    use std::sync::Mutex;
-
-    use anyhow::{anyhow, Result};
-    use whisper_rs::{
-        FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
-    };
-
-    pub struct WhisperStt {
-        // Created once: a fresh state allocates several hundred MB of buffers per request,
-        // which on the Pi costs seconds of page faults and memory compaction.
-        state: Mutex<WhisperState>,
-        _ctx: WhisperContext,
-        threads: i32,
-        beam_size: i32,
-        language: String,
-    }
-
-    impl WhisperStt {
-        pub fn load(model: &Path, threads: i32, beam_size: i32, language: &str) -> Result<Self> {
-            let path = model
-                .to_str()
-                .ok_or_else(|| anyhow!("Modellpfad ist kein UTF-8"))?;
-            if !model.exists() {
-                return Err(anyhow!(
-                    "Whisper-Modell {path} fehlt (deployments/pi/download-models.sh)"
-                ));
-            }
-            let mut ctx_params = WhisperContextParameters::default();
-            ctx_params.flash_attn(true);
-            let ctx = WhisperContext::new_with_params(path, ctx_params)
-                .map_err(|e| anyhow!("Whisper-Modell laden: {e:?}"))?;
-            let state = ctx.create_state().map_err(|e| anyhow!("{e:?}"))?;
-            Ok(Self {
-                state: Mutex::new(state),
-                _ctx: ctx,
-                threads,
-                beam_size,
-                language: language.to_string(),
-            })
-        }
-    }
-
-    impl super::SpeechToText for WhisperStt {
-        fn transcribe(&self, audio: &[f32]) -> Result<String> {
-            let strategy = if self.beam_size > 1 {
-                SamplingStrategy::BeamSearch {
-                    beam_size: self.beam_size,
-                    patience: -1.0,
-                }
-            } else {
-                SamplingStrategy::Greedy { best_of: 1 }
-            };
-            let mut params = FullParams::new(strategy);
-            params.set_n_threads(self.threads);
-            params.set_language(Some(&self.language));
-            params.set_translate(false);
-            params.set_no_context(true);
-            params.set_print_progress(false);
-            params.set_print_realtime(false);
-            params.set_print_special(false);
-            params.set_print_timestamps(false);
-            params.set_audio_ctx(super::audio_ctx(audio.len()));
-
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state
-                .full(params, audio)
-                .map_err(|e| anyhow!("Whisper: {e:?}"))?;
-            let text = state
-                .as_iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-                .join(" ");
-            Ok(text.split_whitespace().collect::<Vec<_>>().join(" "))
-        }
-    }
-}
-
-#[cfg(feature = "piper")]
-pub use piper::PiperVoices;
-
-#[cfg(feature = "piper")]
-mod piper {
+#[cfg(feature = "speech")]
+mod sherpa {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
     use anyhow::{anyhow, Result};
-    use sherpa_rs::tts::{VitsTts, VitsTtsConfig};
-    use sherpa_rs::OnnxConfig;
+    use sherpa_onnx::{
+        GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsModelConfig,
+        OfflineTtsVitsModelConfig, OnlineRecognizer, OnlineRecognizerConfig, OnlineStream,
+    };
 
-    use super::TextToSpeech;
+    use super::{TextToSpeech, Transcription};
+    use crate::audio::STT_RATE;
+
+    /// Silence after the recording: the model looks ahead and would otherwise drop the last word.
+    const TAIL_SECONDS: f32 = 1.0;
+
+    fn path(dir: &Path, file: &str) -> Result<String> {
+        let path = dir.join(file);
+        if !path.exists() {
+            return Err(anyhow!(
+                "{} fehlt (deployments/pi/download-models.sh)",
+                path.display()
+            ));
+        }
+        Ok(path.display().to_string())
+    }
+
+    /// German streaming zipformer by Kroko in the layout of the sherpa-onnx archives:
+    /// `encoder.onnx`, `decoder.onnx`, `joiner.onnx`, `tokens.txt`.
+    pub struct KrokoStt {
+        recognizer: Arc<OnlineRecognizer>,
+    }
+
+    impl KrokoStt {
+        pub fn load(dir: &Path, threads: i32) -> Result<Self> {
+            let mut config = OnlineRecognizerConfig::default();
+            config.model_config.transducer.encoder = Some(path(dir, "encoder.onnx")?);
+            config.model_config.transducer.decoder = Some(path(dir, "decoder.onnx")?);
+            config.model_config.transducer.joiner = Some(path(dir, "joiner.onnx")?);
+            config.model_config.tokens = Some(path(dir, "tokens.txt")?);
+            config.model_config.num_threads = threads;
+            config.model_config.provider = Some("cpu".into());
+            config.decoding_method = Some("greedy_search".into());
+            let recognizer = OnlineRecognizer::create(&config)
+                .ok_or_else(|| anyhow!("Spracherkennung {} nicht geladen", dir.display()))?;
+            Ok(Self {
+                recognizer: Arc::new(recognizer),
+            })
+        }
+    }
+
+    impl super::SpeechToText for KrokoStt {
+        fn start(&self) -> Box<dyn Transcription> {
+            Box::new(KrokoTranscription {
+                stream: self.recognizer.create_stream(),
+                recognizer: Arc::clone(&self.recognizer),
+            })
+        }
+    }
+
+    struct KrokoTranscription {
+        // Declared first so it is dropped before the recognizer it belongs to.
+        stream: OnlineStream,
+        recognizer: Arc<OnlineRecognizer>,
+    }
+
+    impl KrokoTranscription {
+        fn decode(&self) {
+            while self.recognizer.is_ready(&self.stream) {
+                self.recognizer.decode(&self.stream);
+            }
+        }
+    }
+
+    impl Transcription for KrokoTranscription {
+        fn push(&mut self, audio: &[f32]) {
+            self.stream.accept_waveform(STT_RATE as i32, audio);
+            self.decode();
+        }
+
+        fn finish(self: Box<Self>) -> String {
+            let tail = vec![0.0; (STT_RATE as f32 * TAIL_SECONDS) as usize];
+            self.stream.accept_waveform(STT_RATE as i32, &tail);
+            self.stream.input_finished();
+            self.decode();
+            self.recognizer
+                .get_result(&self.stream)
+                .map(|result| result.text.split_whitespace().collect::<Vec<_>>().join(" "))
+                .unwrap_or_default()
+        }
+    }
 
     /// Piper voices in the layout of the sherpa-onnx `vits-piper-*` archives: one directory per voice with
     /// the .onnx model, `tokens.txt` and `espeak-ng-data/`.
@@ -229,7 +197,7 @@ mod piper {
     }
 
     pub struct PiperTts {
-        tts: Mutex<VitsTts>,
+        tts: Mutex<OfflineTts>,
         sample_rate: u32,
     }
 
@@ -240,27 +208,31 @@ mod piper {
                 .map(|e| e.path())
                 .find(|p| p.extension().is_some_and(|ext| ext == "onnx"))
                 .ok_or_else(|| anyhow!("{}: kein .onnx-Modell", dir.display()))?;
-            let config = VitsTtsConfig {
-                model: model.display().to_string(),
-                tokens: dir.join("tokens.txt").display().to_string(),
-                data_dir: dir.join("espeak-ng-data").display().to_string(),
-                length_scale: 1.0,
-                onnx_config: OnnxConfig {
-                    provider: "cpu".into(),
-                    debug: false,
+            let config = OfflineTtsConfig {
+                model: OfflineTtsModelConfig {
+                    vits: OfflineTtsVitsModelConfig {
+                        model: Some(model.display().to_string()),
+                        tokens: Some(path(dir, "tokens.txt")?),
+                        data_dir: Some(path(dir, "espeak-ng-data")?),
+                        ..Default::default()
+                    },
                     num_threads: threads,
+                    provider: Some("cpu".into()),
+                    ..Default::default()
                 },
+                max_num_sentences: 1,
                 ..Default::default()
             };
-            let mut tts = VitsTts::new(config);
-            // The sample rate is only reported with generated audio; this also warms up the model.
-            let warmup = tts
-                .create("Hallo.", 0, 1.0)
-                .map_err(|e| anyhow!("Piper: {e}"))?;
-            Ok(Self {
+            let tts = OfflineTts::create(&config)
+                .ok_or_else(|| anyhow!("Stimme {} nicht geladen", dir.display()))?;
+            let sample_rate = tts.sample_rate() as u32;
+            let voice = Self {
                 tts: Mutex::new(tts),
-                sample_rate: warmup.sample_rate,
-            })
+                sample_rate,
+            };
+            // The first sentence of a fresh model is slow; it should not be the first answer.
+            voice.synthesize("Hallo.", 1.0)?;
+            Ok(voice)
         }
     }
 
@@ -270,11 +242,15 @@ mod piper {
         }
 
         fn synthesize(&self, text: &str, speed: f32) -> Result<Vec<f32>> {
-            let mut tts = self.tts.lock().unwrap_or_else(|e| e.into_inner());
+            let tts = self.tts.lock().unwrap_or_else(|e| e.into_inner());
+            let config = GenerationConfig {
+                speed,
+                ..Default::default()
+            };
             let audio = tts
-                .create(text, 0, speed)
-                .map_err(|e| anyhow!("Piper: {e}"))?;
-            Ok(audio.samples)
+                .generate_with_config(text, &config, None::<fn(&[f32], f32) -> bool>)
+                .ok_or_else(|| anyhow!("Piper: keine Sprachausgabe für {text:?}"))?;
+            Ok(audio.samples().to_vec())
         }
     }
 }
@@ -282,36 +258,10 @@ mod piper {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn cleans_whisper_transcripts() {
-        use super::clean_transcript as clean;
-        assert_eq!(
-            clean("Hi, wie wird das Wetter morgen? [Musik]"),
-            "Hi, wie wird das Wetter morgen?"
-        );
-        assert_eq!(
-            clean("(Lachen) Erzähl mir einen Witz *räuspert*"),
-            "Erzähl mir einen Witz"
-        );
-        assert_eq!(clean("Untertitel im Auftrag des ZDF, 2021"), "");
-        assert_eq!(clean("[Musik]"), "");
-        assert_eq!(clean(" ... "), "");
-        assert_eq!(
-            clean("Wie wird das Wetter morgen?"),
-            "Wie wird das Wetter morgen?"
-        );
-    }
-
-    #[test]
     fn labels_voices() {
         assert_eq!(
             super::voice_label("vits-piper-de_DE-thorsten-medium"),
             "thorsten (de_DE, medium)"
         );
-    }
-
-    #[test]
-    fn audio_ctx_follows_the_recording_length() {
-        assert_eq!(super::audio_ctx(3 * 16_000), 278);
-        assert_eq!(super::audio_ctx(60 * 16_000), 1500);
     }
 }

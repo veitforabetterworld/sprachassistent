@@ -4,13 +4,13 @@ Sprachassistent mit Persönlichkeit und Gedächtnis. ESP32 dienen als Mikrofon u
 
 ```
 ESP32 (INMP441, MAX98357A, Taster)
-  │  POST /v1/talk  (16 kHz PCM, chunked, ESP-Schlüssel)
+  │  POST /v1/talk  (16 kHz PCM, chunked, ESP-Schlüssel) → Rahmen: Audio und Status für die LED
   ▼
 sprachassistent.plenivo.de ─ nginx
   ├─ /v1/talk, /v1/health ─ 127.0.0.1:3020  Rust-Sprachserver (axum)
-  │     ├─ Spracherkennung  whisper.cpp (whisper-rs)              lokal
+  │     ├─ Spracherkennung  Kroko, live beim Sprechen (sherpa-onnx)  lokal
   │     ├─ KI               Anbieter aus der DB, mit Fallback      extern, nur Text
-  │     └─ Sprachausgabe    Piper-Stimmen (sherpa-rs), je Gerät     lokal
+  │     └─ Sprachausgabe    Piper-Stimmen (sherpa-onnx), je Gerät   lokal
   ├─ /v1/*            ─ 127.0.0.1:3022  Web-API (Node, veit-framework)
   │     Konten, ESP-Schlüssel, Geräte, KI-Anbieter, Gedächtnis, Einstellungen
   └─ /                ─ Adminbereich (React, veit-framework)
@@ -18,6 +18,8 @@ Postgres: Einstellungen, Anbieter, Geräte, Gedächtnis je Gerät, Konten und Sc
 ```
 
 Nur Text verlässt das Heimnetz. Laufende Kosten: Strom für den Pi und die Gratis-Kontingente von Groq oder Gemini.
+
+Die Spracherkennung nutzt das deutsche Streaming-Modell von [Kroko (Banafo)](https://huggingface.co/Banafo/Kroko-ASR) unter CC-BY-SA; `deployments/pi/download-models.sh` lädt es.
 
 ## Struktur
 
@@ -27,7 +29,7 @@ src/                 Rust-Sprachserver
   store.rs           Postgres: Geräte, Gedächtnis, Anbieter, ESP-Schlüssel prüfen
   assistant.rs       Prompt und Persönlichkeit je Gerät, Regeln nur für angebotene Werkzeuge
   context.rs         Gedächtnis: Kontext (500 Zeichen), den das Modell nach der Antwort selbst neu schreibt
-  speech.rs          Whisper (Feature whisper) und Piper-Stimmen (Feature piper)
+  speech.rs          Live-Spracherkennung (Kroko) und Piper-Stimmen über sherpa-onnx (Feature speech)
   llm.rs             OpenAI-kompatible Anbieter mit Fallback, Streaming
   tools.rs           Werkzeuge: Internetrecherche über selbstgehostetes SearXNG, MCP-Werkzeuge
   web.rs             Seiten lesen (follow): nur öffentliche https-Adressen, Links mit Titel
@@ -109,7 +111,7 @@ docker build -t sprachassistent-build deployments/build
 docker run --rm -v "$PWD:/src" sprachassistent-build    # → bin/sprachassistent, bin/lib/*.so (aarch64)
 ```
 
-Der Build kompiliert unter Debian bookworm mit dem aarch64-Cross-Compiler für den Cortex-A76 des Pi 5 (läuft nicht auf einem Pi 4). whisper.cpp wird aus dem Quellcode gebaut. sherpa-onnx gibt es für aarch64 nur als vorgebaute Shared Library; sie liegt mit onnxruntime in `bin/lib/`, die Binärdatei findet sie über `rpath $ORIGIN/lib`.
+Der Build kompiliert unter Debian bookworm mit dem aarch64-Cross-Compiler für den Cortex-A76 des Pi 5 (läuft nicht auf einem Pi 4). sherpa-onnx gibt es für aarch64 nur als vorgebaute Shared Library; sie liegt mit onnxruntime in `bin/lib/`, die Binärdatei findet sie über `rpath $ORIGIN/lib`.
 
 ## Betrieb auf dem Pi
 

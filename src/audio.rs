@@ -2,8 +2,36 @@
 
 use anyhow::{bail, Result};
 
-/// Sample rate whisper expects and the ESP32 records with.
+/// Sample rate of the recognizer and of the ESP32 microphone.
 pub const STT_RATE: u32 = 16_000;
+
+/// Raw s16le mono as it arrives over the network. A piece may end inside a sample; its first
+/// byte waits for the next piece.
+#[derive(Default)]
+pub struct PcmPieces {
+    carry: Option<u8>,
+}
+
+impl PcmPieces {
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<f32> {
+        let mut joined;
+        let bytes = match self.carry.take() {
+            Some(first) => {
+                joined = Vec::with_capacity(bytes.len() + 1);
+                joined.push(first);
+                joined.extend_from_slice(bytes);
+                joined.as_slice()
+            }
+            None => bytes,
+        };
+        let (pairs, rest) = bytes.as_chunks::<2>();
+        self.carry = rest.first().copied();
+        pairs
+            .iter()
+            .map(|b| i16::from_le_bytes(*b) as f32 / 32768.0)
+            .collect()
+    }
+}
 
 /// Decodes an upload into 16 kHz mono f32. A body starting with `RIFF` is read as WAV,
 /// everything else as raw signed 16-bit little-endian mono at `raw_rate`.
@@ -86,7 +114,7 @@ pub fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
         .collect()
 }
 
-/// Root mean square, used to skip silent recordings before whisper hallucinates on them.
+/// Root mean square, used to skip silent recordings without asking the model.
 pub fn rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
@@ -157,6 +185,19 @@ mod tests {
         let out = decode_upload(&wav(32_000, 2, &samples), 16_000).unwrap();
         assert_eq!(out.len(), 1600);
         assert!(out.iter().all(|s| (s - 0.25).abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_sample_split_between_pieces_is_joined() {
+        let bytes: Vec<u8> = [16384i16, -16384, 8192]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        let mut pieces = PcmPieces::default();
+        let mut out = pieces.push(&bytes[..3]);
+        out.extend(pieces.push(&bytes[3..5]));
+        out.extend(pieces.push(&bytes[5..]));
+        assert_eq!(out, vec![0.5, -0.5, 0.25]);
     }
 
     #[test]

@@ -21,7 +21,6 @@ use futures_util::StreamExt;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::agent::{Channel, Status, Voice};
@@ -30,10 +29,10 @@ use crate::audio;
 use crate::llm::{ChatMessage, Provider, ToolDef};
 use crate::mcp;
 use crate::sentences::SentenceSplitter;
-use crate::speech::{clean_transcript, voice_label, SpeechToText, TextToSpeech, VoiceBank};
+use crate::speech::{voice_label, SpeechToText, TextToSpeech, VoiceBank};
 use crate::store::Device;
 
-/// 30 s of 16 kHz 16-bit audio is under 1 MB; WAV uploads from a PC may be stereo/44.1 kHz.
+/// 30 s of 16 kHz 16-bit audio is under 1 MB; WAV recordings from the browser may be stereo/48 kHz.
 const MAX_UPLOAD: usize = 12 * 1024 * 1024;
 /// Recordings quieter than this are treated as silence.
 const SILENCE_RMS: f32 = 0.002;
@@ -43,8 +42,6 @@ pub struct AppState {
     pub assistant: Arc<Assistant>,
     pub stt: Option<Arc<dyn SpeechToText>>,
     pub voices: Arc<dyn VoiceBank>,
-    /// One recognition at a time; two in parallel would only slow both down on the Pi.
-    pub stt_slot: Arc<Semaphore>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -113,8 +110,6 @@ async fn voices(State(state): State<AppState>) -> Json<serde_json::Value> {
 struct TalkQuery {
     /// Needed when the key covers several devices.
     device: Option<Uuid>,
-    /// Sample rate of a raw PCM upload, default 16000
-    rate: Option<u32>,
 }
 
 fn device_key(headers: &HeaderMap) -> &str {
@@ -135,34 +130,64 @@ async fn voice_of(state: &AppState, device: &Device) -> ApiResult<Arc<dyn TextTo
         .map_err(|e| ApiError(StatusCode::SERVICE_UNAVAILABLE, format!("{e:#}")))
 }
 
-async fn recognize(state: &AppState, body: &[u8], rate: u32) -> ApiResult<String> {
-    let stt = state.stt.clone().ok_or_else(|| {
+fn recognizer(state: &AppState) -> ApiResult<Arc<dyn SpeechToText>> {
+    state.stt.clone().ok_or_else(|| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "Spracherkennung nicht verfuegbar".into(),
         )
-    })?;
-    let samples = audio::decode_upload(body, rate)
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
-    let seconds = samples.len() as f32 / audio::STT_RATE as f32;
-    if seconds < 0.3 || audio::rms(&samples) < SILENCE_RMS {
+    })
+}
+
+/// Silence and a press that is too short are answered without asking the model.
+fn is_silence(seconds: f32, rms: f32) -> bool {
+    seconds < 0.3 || rms < SILENCE_RMS
+}
+
+/// The device's recording (raw s16le mono, 16 kHz) goes to the recognizer while it is still
+/// arriving; after the last piece only the end is left to decode.
+async fn recognize_live(state: &AppState, body: Body) -> ApiResult<String> {
+    let stt = recognizer(state)?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut transcription = stt.start();
+        let (mut samples, mut energy) = (0usize, 0f64);
+        while let Some(piece) = rx.blocking_recv() {
+            samples += piece.len();
+            energy += piece.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
+            transcription.push(&piece);
+        }
+        let ended = std::time::Instant::now();
+        let text = transcription.finish();
+        (text, samples, energy, ended.elapsed())
+    });
+    let mut pieces = audio::PcmPieces::default();
+    let mut upload = body.into_data_stream();
+    let mut size = 0;
+    while let Some(chunk) = upload.next().await {
+        let chunk = chunk.map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("Upload: {e}")))?;
+        size += chunk.len();
+        if size > MAX_UPLOAD {
+            return Err(ApiError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Aufnahme zu lang".into(),
+            ));
+        }
+        let _ = tx.send(pieces.push(&chunk));
+    }
+    drop(tx);
+    let (text, samples, energy, tail) = worker.await.map_err(|e| anyhow::anyhow!(e))?;
+    let seconds = samples as f32 / audio::STT_RATE as f32;
+    let rms = (energy / samples.max(1) as f64).sqrt() as f32;
+    if is_silence(seconds, rms) {
         tracing::info!("Stille oder zu kurz ({seconds:.1} s)");
         return Ok(String::new());
     }
-    let _slot = state
-        .stt_slot
-        .acquire()
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let started = std::time::Instant::now();
-    let text = tokio::task::spawn_blocking(move || stt.transcribe(&samples))
-        .await
-        .map_err(|e| anyhow::anyhow!(e))??;
     tracing::info!(
-        "Erkannt in {:.1} s ({seconds:.1} s Audio): {text}",
-        started.elapsed().as_secs_f32()
+        "Erkannt {} ms nach dem Ende ({seconds:.1} s Audio): {text}",
+        tail.as_millis()
     );
-    Ok(clean_transcript(&text))
+    Ok(text)
 }
 
 /// How the spoken answer is sent.
@@ -249,7 +274,7 @@ async fn talk(
     State(state): State<AppState>,
     Query(q): Query<TalkQuery>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> ApiResult<Response> {
     let device = state
         .assistant
@@ -259,7 +284,7 @@ async fn talk(
         .map_err(|e| ApiError(StatusCode::UNAUTHORIZED, format!("{e:#}")))?;
     let tts = voice_of(&state, &device).await?;
     let format = AudioFormat::Frames;
-    let text = recognize(&state, &body, q.rate.unwrap_or(audio::STT_RATE)).await?;
+    let text = recognize_live(&state, body).await?;
     if text.is_empty() {
         let sentences = futures_util::stream::iter([Voice::Say(NOT_UNDERSTOOD.to_string())]);
         return Ok(audio_response(
@@ -313,7 +338,21 @@ async fn transcribe(
     State(state): State<AppState>,
     body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let text = recognize(&state, &body, audio::STT_RATE).await?;
+    let stt = recognizer(&state)?;
+    let samples = audio::decode_upload(&body, audio::STT_RATE)
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    let seconds = samples.len() as f32 / audio::STT_RATE as f32;
+    if is_silence(seconds, audio::rms(&samples)) {
+        return Ok(Json(json!({ "text": "" })));
+    }
+    let started = std::time::Instant::now();
+    let text = tokio::task::spawn_blocking(move || stt.transcribe(&samples))
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    tracing::info!(
+        "Erkannt in {} ms ({seconds:.1} s Audio): {text}",
+        started.elapsed().as_millis()
+    );
     Ok(Json(json!({ "text": text })))
 }
 

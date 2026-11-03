@@ -1,10 +1,12 @@
 #!/bin/bash
-# Downloads the speech models into models/ (once, about 450 MB). Existing files are kept.
+# Downloads the speech models into models/ (once, about 400 MB). Existing files are kept.
 # Each device picks one of the voices in the admin area.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
-WHISPER_MODEL_NAME="${WHISPER_MODEL_NAME:-ggml-small-q5_1.bin}"
+# German streaming recognizer by Kroko (Banafo), CC-BY-SA:
+# https://huggingface.co/Banafo/Kroko-ASR
+STT_MODEL="sherpa-onnx-streaming-zipformer-de-kroko-2025-08-06"
 # German Piper voices as sherpa-onnx archives (vits-piper-<name>.tar.bz2).
 VOICES=(
   de_DE-thorsten-medium
@@ -17,13 +19,15 @@ VOICES=(
 
 log() { echo "[sprachassistent-models] $*"; }
 
-mkdir -p models/whisper
-if [ ! -f "models/whisper/$WHISPER_MODEL_NAME" ]; then
-  log "Whisper $WHISPER_MODEL_NAME"
-  curl -fL --retry 3 -o "models/whisper/$WHISPER_MODEL_NAME.part" \
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$WHISPER_MODEL_NAME"
-  mv "models/whisper/$WHISPER_MODEL_NAME.part" "models/whisper/$WHISPER_MODEL_NAME"
+mkdir -p models/stt
+if [ ! -f "models/stt/$STT_MODEL/tokens.txt" ]; then
+  log "Spracherkennung $STT_MODEL"
+  rm -rf "models/stt/$STT_MODEL"
+  curl -fL --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$STT_MODEL.tar.bz2" \
+    | tar -xj -C models/stt
 fi
+# Replaced by the streaming recognizer.
+rm -rf models/whisper
 
 for voice in "${VOICES[@]}"; do
   dir="vits-piper-$voice"

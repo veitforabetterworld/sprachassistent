@@ -6,11 +6,10 @@ description = "Sprachassistent mit Persoenlichkeit und Gedaechtnis: ESP32 als Mi
 publish = false
 
 [features]
-default = ["whisper", "piper"]
-# Spracherkennung mit whisper.cpp
-whisper = ["dep:whisper-rs"]
-# Sprachausgabe mit Piper-Stimmen ueber sherpa-onnx (vorgebaute Bibliothek, liegt in bin/lib)
-piper = ["dep:sherpa-rs"]
+default = ["speech"]
+# Live-Spracherkennung (Kroko, streaming) und Piper-Stimmen ueber sherpa-onnx
+# (vorgebaute Bibliothek, liegt in bin/lib)
+speech = ["dep:sherpa-onnx"]
 
 [dependencies]
 anyhow = "1"
@@ -34,8 +33,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["serde"] }
 
-whisper-rs = { version = "0.16", optional = true }
-sherpa-rs = { version = "0.6", optional = true, default-features = false, features = ["tts", "download-binaries"] }
+# 2.x dropped espeak-ng for Piper voices (they then need an external phonemizer); 1.13 still has it.
+sherpa-onnx = { version = "=1.13.8", optional = true, default-features = false, features = ["shared"] }
 rmcp = { version = "3.8.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 

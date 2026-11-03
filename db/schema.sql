@@ -15,15 +15,16 @@ INSERT INTO app_settings (key, value) VALUES
   ('smtp_user', ''),
   ('smtp_password', ''),
   ('smtp_from', ''),
-  ('whisper_model', 'models/whisper/ggml-small-q5_1.bin'),
-  ('whisper_threads', '4'),
-  ('whisper_beam_size', '1'),
-  ('whisper_language', 'de'),
+  ('stt_model', 'models/stt/sherpa-onnx-streaming-zipformer-de-kroko-2025-08-06'),
+  ('stt_threads', '1'),
   ('tts_threads', '2'),
   ('google_oauth_client_id', ''),
   ('google_oauth_client_secret', ''),
   ('account_verification', '0')
 ON CONFLICT (key) DO NOTHING;
+
+-- Whisper gave way to the streaming recognizer, which reads the audio while it is recorded.
+DELETE FROM app_settings WHERE key LIKE 'whisper\_%';
 
 -- OpenAI-compatible chat providers of one user, tried by ascending priority when a device has none of its own.
 CREATE TABLE IF NOT EXISTS llm_providers (

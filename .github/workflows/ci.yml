@@ -25,7 +25,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # Without whisper/piper: no C++ build needed, the API runs against fakes and a real Postgres.
+      # Without the speech feature: no sherpa-onnx download needed, the API runs against fakes and a real Postgres.
       - run: cargo fmt --check
       - run: cargo clippy --no-default-features --all-targets -- -D warnings
       - run: cargo test --no-default-features

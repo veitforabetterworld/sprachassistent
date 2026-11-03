@@ -61,14 +61,12 @@ const GROUPS: Group[] = [
     title: "speechTitle",
     description: "speechHint",
     fields: [
-      { key: "whisper_model", label: "whisperModel", kind: "text", hint: "whisperModelHint" },
-      { key: "whisper_language", label: "whisperLanguage", kind: "text", hint: "whisperLanguageHint" },
-      { key: "whisper_threads", label: "whisperThreads", kind: "text" },
-      { key: "whisper_beam_size", label: "whisperBeam", kind: "text", hint: "whisperBeamHint" },
+      { key: "stt_model", label: "sttModel", kind: "text", hint: "sttModelHint" },
+      { key: "stt_threads", label: "sttThreads", kind: "text", hint: "sttThreadsHint" },
       { key: "tts_threads", label: "ttsThreads", kind: "text" },
     ],
     summary: (v, _t, tf) =>
-      tf("speechSummary", { model: String(v.whisper_model).split("/").pop() ?? "", language: String(v.whisper_language), threads: String(v.whisper_threads) }),
+      tf("speechSummary", { model: String(v.stt_model).split("/").pop() ?? "", threads: String(v.stt_threads) }),
   },
 ];
 

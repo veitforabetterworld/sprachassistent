@@ -11,7 +11,6 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use sqlx::PgPool;
-use tokio::sync::Semaphore;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -21,7 +20,7 @@ use sprachassistent::assistant::Assistant;
 use sprachassistent::authz::Effect;
 use sprachassistent::llm::{ChatMessage, ChatModel, ModelTurn, Provider, TokenStream, ToolCall};
 use sprachassistent::secrets::Secrets;
-use sprachassistent::speech::{SpeechToText, TextToSpeech, VoiceBank};
+use sprachassistent::speech::{SpeechToText, TextToSpeech, Transcription, VoiceBank};
 use sprachassistent::store::{hash_api_key, Store};
 use sprachassistent::tools::{EmptyTools, ToolExecutor, ToolOffer};
 
@@ -119,8 +118,21 @@ impl ToolExecutor for ScriptTools {
 struct FakeStt;
 
 impl SpeechToText for FakeStt {
-    fn transcribe(&self, audio: &[f32]) -> Result<String> {
-        Ok(format!("Ich bin Veit, {} Samples", audio.len()))
+    fn start(&self) -> Box<dyn Transcription> {
+        Box::new(FakeTranscription(0))
+    }
+}
+
+/// Counts what arrives, piece by piece.
+struct FakeTranscription(usize);
+
+impl Transcription for FakeTranscription {
+    fn push(&mut self, audio: &[f32]) {
+        self.0 += audio.len();
+    }
+
+    fn finish(self: Box<Self>) -> String {
+        format!("Ich bin Veit, {} Samples", self.0)
     }
 }
 
@@ -211,7 +223,6 @@ async fn setup() -> Option<Setup> {
         }),
         stt: Some(Arc::new(FakeStt)),
         voices: Arc::new(FakeVoices),
-        stt_slot: Arc::new(Semaphore::new(1)),
     });
     Some(Setup {
         app,
@@ -544,7 +555,6 @@ async fn named_tool_setup(
         }),
         stt: Some(Arc::new(FakeStt)),
         voices: Arc::new(FakeVoices),
-        stt_slot: Arc::new(Semaphore::new(1)),
     });
     let key = s.key(owner, &[device]).await;
     Some((
