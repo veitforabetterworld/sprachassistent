@@ -16,3 +16,5 @@ node_modules/
 dist/
 *.tsbuildinfo
 apps/web/.vite/
+
+.claude/settings.local.json
