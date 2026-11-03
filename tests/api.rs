@@ -285,6 +285,22 @@ fn talk(key: &str, query: &str, body: Vec<u8>) -> Request<Body> {
         .unwrap()
 }
 
+/// Statuses and the number of audio bytes in a `/v1/talk` answer.
+fn frames(body: &[u8]) -> (Vec<String>, usize) {
+    let (mut statuses, mut audio, mut rest) = (Vec::new(), 0, body);
+    while !rest.is_empty() {
+        let len = u32::from_le_bytes(rest[1..5].try_into().unwrap()) as usize;
+        let payload = &rest[5..5 + len];
+        match rest[0] {
+            1 => audio += len,
+            2 => statuses.push(String::from_utf8(payload.to_vec()).unwrap()),
+            other => panic!("unbekannter Rahmen {other}"),
+        }
+        rest = &rest[5 + len..];
+    }
+    (statuses, audio)
+}
+
 /// One second of a 440 Hz tone as raw s16le at 16 kHz.
 fn tone() -> Vec<u8> {
     (0..16_000)
@@ -337,7 +353,9 @@ async fn talk_streams_speech_and_remembers_per_device() {
         .unwrap()
         .starts_with("Ich%20bin%20Veit"));
     let spoken = "Hallo Veit, schön dich zu hören.".chars().count() + "Wie geht's?".chars().count();
-    assert_eq!(body.len(), spoken * 2);
+    let (statuses, audio) = frames(&body);
+    assert_eq!(audio, spoken * 2);
+    assert_eq!(statuses, ["thinking", "speaking"]);
 
     // The context block is neither spoken nor stored with the reply; it becomes the context.
     let stored = s.store.last_exchange(a).await.unwrap();
@@ -359,10 +377,15 @@ async fn silence_is_answered_without_asking_the_model() {
     let owner = s.user(false).await;
     let device = s.device(owner, "").await;
     let key = s.key(owner, &[device]).await;
-    let (status, headers, body) = s.send(talk(&key, "?format=wav", vec![0u8; 32_000])).await;
+    let (status, headers, body) = s.send(talk(&key, "", vec![0u8; 32_000])).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers["content-type"], "audio/wav");
-    assert_eq!(&body[..4], b"RIFF");
+    assert_eq!(headers["content-type"], "application/octet-stream");
+    let (statuses, audio) = frames(&body);
+    assert_eq!(statuses, ["speaking"]);
+    assert_eq!(
+        audio,
+        "Das habe ich leider nicht verstanden.".chars().count() * 2
+    );
     assert!(s.llm.seen.lock().unwrap().is_empty());
 }
 
@@ -703,7 +726,7 @@ async fn tool_call_speaks_the_busy_line_before_the_answer() {
     assert_eq!(status, StatusCode::OK);
     let busy = "Einen Moment.".chars().count();
     let answer = "Erledigt.".chars().count();
-    assert_eq!(body.len(), (busy + answer) * 2);
+    assert_eq!(frames(&body).1, (busy + answer) * 2);
     assert_eq!(*tools.calls.lock().unwrap(), 1);
     let seen = s.llm.seen.lock().unwrap();
     let second = &seen[1].1;
@@ -712,6 +735,26 @@ async fn tool_call_speaks_the_busy_line_before_the_answer() {
         .any(|m| m.role == "tool" && m.content.contains("pong")));
     assert!(second.iter().any(|m| m.content.contains("tool_result")));
     let _ = device;
+}
+
+#[tokio::test]
+async fn frames_tell_the_device_what_happens_before_it_speaks() {
+    let Some((s, _, _, key)) = tool_setup(Effect::Auto).await else {
+        return;
+    };
+    s.llm.push(tool_turn(true, ""));
+    s.llm.push(tool_turn(false, "Erledigt."));
+    let (status, _, body) = s.send(talk(&key, "", tone())).await;
+    assert_eq!(status, StatusCode::OK);
+    let (statuses, audio) = frames(&body);
+    // The busy line is spoken right after the first answer, the tool runs, then the reply.
+    assert_eq!(
+        statuses,
+        ["thinking", "speaking", "home", "thinking"],
+        "{statuses:?}"
+    );
+    let spoken = "Einen Moment.".chars().count() + "Erledigt.".chars().count();
+    assert_eq!(audio, spoken * 2);
 }
 
 #[tokio::test]

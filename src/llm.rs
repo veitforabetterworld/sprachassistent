@@ -10,6 +10,7 @@ use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 
 use crate::secrets::redact;
 
@@ -138,6 +139,22 @@ pub trait ChatModel: Send + Sync {
         json: bool,
         force_tool: bool,
     ) -> Result<ModelTurn>;
+    /// Like `complete` with tools offered, not forced, but the reply text also arrives piece by
+    /// piece in `pieces` while the model writes it, so speaking can start early. Tool calls come
+    /// whole in the returned turn.
+    async fn complete_streamed(
+        &self,
+        providers: &[Provider],
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+        pieces: mpsc::Sender<String>,
+    ) -> Result<ModelTurn> {
+        let turn = self
+            .complete(providers, messages, tools, false, false)
+            .await?;
+        let _ = pieces.send(turn.content.clone()).await;
+        Ok(turn)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +258,11 @@ impl Llm {
         });
         if json_mode {
             body["response_format"] = json!({ "type": "json_object" });
+        }
+        // Gemini 3 thinks before every reply by default, 5 to 8 s for a spoken sentence.
+        // It cannot be switched off there; "minimal" is the shortest.
+        if google {
+            body["reasoning_effort"] = json!("minimal");
         }
         if !tools.is_empty() {
             let chosen = select_tools(tools, messages);
@@ -683,6 +705,189 @@ impl ChatModel for Llm {
         }
         Err(no_provider(errors))
     }
+
+    async fn complete_streamed(
+        &self,
+        providers: &[Provider],
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+        pieces: mpsc::Sender<String>,
+    ) -> Result<ModelTurn> {
+        // As with `stream`: the next model only takes over before the reply has started.
+        let mut errors = Vec::new();
+        for p in providers {
+            let body = Self::body(p, messages, true, false, tools, false);
+            match self.post(p, &body, ANSWER_WAIT).await {
+                Ok(resp) => {
+                    let mut turn = read_streamed_turn(resp, &p.name, &pieces).await?;
+                    turn.nudge_tools = p.nudge_tools;
+                    tracing::info!(
+                        "{}: Stream-Ende {}, {} Tokens, {} Werkzeugaufrufe",
+                        p.name,
+                        finish_label(&turn.finish_reason),
+                        turn.output_tokens,
+                        turn.tool_calls.len()
+                    );
+                    return Ok(turn);
+                }
+                Err(e) => {
+                    let text = e.to_string();
+                    if let Some(call) = salvage_tool_call(&text, tools) {
+                        tracing::warn!("{}: Werkzeugaufruf korrigiert auf {}", p.name, call.name);
+                        return Ok(salvaged_turn(p, call));
+                    }
+                    tracing::warn!("{} fehlgeschlagen: {}", p.name, redact(&format!("{e:#}")));
+                    errors.push(format!("{}: {}", p.name, redact(&text)));
+                }
+            }
+        }
+        Err(no_provider(errors))
+    }
+}
+
+/// A call recovered from the error text of a rejected request.
+fn salvaged_turn(provider: &Provider, call: ToolCall) -> ModelTurn {
+    ModelTurn {
+        content: String::new(),
+        tool_calls: vec![call],
+        input_tokens: 0,
+        output_tokens: 0,
+        provider: provider.name.clone(),
+        nudge_tools: provider.nudge_tools,
+        finish_reason: "salvaged".into(),
+    }
+}
+
+/// A reply with tools, assembled from stream chunks: text grows piece by piece, each tool call
+/// from fragments of its name and arguments.
+#[derive(Default)]
+struct StreamedTurn {
+    content: String,
+    calls: Vec<ToolCall>,
+    finish: String,
+    input_tokens: i32,
+    output_tokens: i32,
+}
+
+impl StreamedTurn {
+    /// Takes one chunk; returns its reply text, if it has any.
+    fn take(&mut self, v: &Value) -> Option<String> {
+        // Groq reports usage under `x_groq` in the last chunk, others under `usage`.
+        let usage = Some(&v["usage"])
+            .filter(|u| u.is_object())
+            .or_else(|| Some(&v["x_groq"]["usage"]).filter(|u| u.is_object()));
+        if let Some(usage) = usage {
+            self.input_tokens = usage["prompt_tokens"].as_i64().unwrap_or(0) as i32;
+            self.output_tokens = usage["completion_tokens"].as_i64().unwrap_or(0) as i32;
+        }
+        let choice = &v["choices"][0];
+        if let Some(reason) = choice["finish_reason"].as_str() {
+            self.finish = reason.to_string();
+        }
+        for part in choice["delta"]["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let id = part["id"].as_str().filter(|id| !id.is_empty());
+            // Gemini sends each call whole and without `index`; a new id starts a new call.
+            let at = match part["index"].as_u64() {
+                Some(index) => index as usize,
+                None if id.is_some_and(|id| self.calls.last().is_none_or(|c| c.id != id)) => {
+                    self.calls.len()
+                }
+                None => self.calls.len().saturating_sub(1),
+            };
+            while self.calls.len() <= at {
+                self.calls.push(ToolCall::default());
+            }
+            let call = &mut self.calls[at];
+            if let Some(id) = id {
+                call.id = id.to_string();
+            }
+            if let Some(name) = part["function"]["name"].as_str() {
+                call.name.push_str(name);
+            }
+            match &part["function"]["arguments"] {
+                Value::String(s) => call.arguments.push_str(s),
+                Value::Null => {}
+                other => call.arguments.push_str(&other.to_string()),
+            }
+            if let Some(signature) = part["extra_content"]["google"]["thought_signature"].as_str() {
+                call.thought_signature = Some(signature.to_string());
+            }
+        }
+        let text = choice["delta"]["content"]
+            .as_str()
+            .filter(|t| !t.is_empty())?;
+        self.content.push_str(text);
+        Some(text.to_string())
+    }
+
+    fn into_turn(self, provider: &str) -> Result<ModelTurn> {
+        let tool_calls: Vec<ToolCall> = self
+            .calls
+            .into_iter()
+            .filter(|call| !call.name.is_empty())
+            .enumerate()
+            .map(|(i, mut call)| {
+                if call.id.is_empty() {
+                    call.id = format!("call_{i}");
+                }
+                if call.arguments.trim().is_empty() {
+                    call.arguments = "{}".into();
+                }
+                call
+            })
+            .collect();
+        if self.content.is_empty() && tool_calls.is_empty() {
+            bail!("Antwort ohne Inhalt");
+        }
+        Ok(ModelTurn {
+            content: self.content,
+            tool_calls,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            provider: provider.to_string(),
+            nudge_tools: false,
+            finish_reason: self.finish,
+        })
+    }
+}
+
+async fn read_streamed_turn(
+    resp: reqwest::Response,
+    provider: &str,
+    pieces: &mpsc::Sender<String>,
+) -> Result<ModelTurn> {
+    let mut turn = StreamedTurn::default();
+    let mut bytes = resp.bytes_stream();
+    // Bytes, not String: a UTF-8 character can be split across network chunks.
+    let mut buf: Vec<u8> = Vec::new();
+    'read: while let Some(chunk) = bytes.next().await {
+        buf.extend_from_slice(&chunk?);
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line);
+            let Some(data) = line.trim().strip_prefix("data:").map(str::trim) else {
+                continue;
+            };
+            if data == "[DONE]" {
+                break 'read;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            if v.get("error").is_some() {
+                bail!("{}", redact(&data.chars().take(600).collect::<String>()));
+            }
+            if let Some(text) = turn.take(&v) {
+                // Nobody listening any more only means the speaker is gone; the turn still counts.
+                let _ = pieces.send(text).await;
+            }
+        }
+    }
+    turn.into_turn(provider)
 }
 
 impl Llm {
@@ -715,15 +920,7 @@ impl Llm {
                         provider.name,
                         call.name
                     );
-                    return Ok(ModelTurn {
-                        content: String::new(),
-                        tool_calls: vec![call],
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        provider: provider.name.clone(),
-                        nudge_tools: provider.nudge_tools,
-                        finish_reason: "salvaged".into(),
-                    });
+                    return Ok(salvaged_turn(provider, call));
                 }
                 bail!(text)
             }
@@ -848,6 +1045,46 @@ mod tests {
                 .starts_with("keine Verbindung zu http://127.0.0.1:"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_streamed_turn_assembles_text_and_tool_calls() {
+        let mut groq = StreamedTurn::default();
+        let chunks = [
+            json!({"choices": [{"delta": {"content": "Ich schaue "}}]}),
+            json!({"choices": [{"delta": {"content": "nach."}}]}),
+            json!({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "a", "function": {"name": "web_research", "arguments": "{\"action\":"}}
+            ]}}]}),
+            json!({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": "\"news\"}"}}
+            ]}, "finish_reason": "tool_calls"}],
+             "x_groq": {"usage": {"prompt_tokens": 900, "completion_tokens": 20}}}),
+        ];
+        let text: Vec<_> = chunks.iter().filter_map(|c| groq.take(c)).collect();
+        assert_eq!(text, ["Ich schaue ", "nach."]);
+        let turn = groq.into_turn("Groq").unwrap();
+        assert_eq!(turn.content, "Ich schaue nach.");
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].arguments, r#"{"action":"news"}"#);
+        assert_eq!((turn.input_tokens, turn.output_tokens), (900, 20));
+        assert_eq!(turn.finish_reason, "tool_calls");
+
+        // Gemini: whole calls without index, the first one signed.
+        let mut gemini = StreamedTurn::default();
+        gemini.take(&json!({"choices": [{"delta": {"tool_calls": [
+            {"id": "x", "function": {"name": "a", "arguments": "{}"},
+             "extra_content": {"google": {"thought_signature": "sig"}}}
+        ]}}]}));
+        gemini.take(&json!({"choices": [{"delta": {"tool_calls": [
+            {"id": "y", "function": {"name": "b", "arguments": "{}"}}
+        ]}, "finish_reason": "stop"}]}));
+        let turn = gemini.into_turn("Gemini").unwrap();
+        let names: Vec<_> = turn.tool_calls.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(turn.tool_calls[0].thought_signature.as_deref(), Some("sig"));
+
+        assert!(StreamedTurn::default().into_turn("leer").is_err());
     }
 
     #[test]

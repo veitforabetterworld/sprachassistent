@@ -2,6 +2,10 @@
 //!
 //! Public (nginx forwards them): `GET /v1/health` and `POST /v1/talk` for the ESPs, authenticated with an ESP key
 //! from the admin area (`Authorization: Bearer spa_...` or `X-API-Key`).
+//!
+//! `/v1/talk` answers in frames, so the device can show what the assistant is doing before it
+//! speaks: one byte kind (1 audio as s16le mono at `X-Sample-Rate`, 2 status as ASCII), four bytes
+//! length (little endian), then the payload. Statuses: thinking, research, home, speaking.
 //! Internal (localhost only, used by apps/api for the admin area): `/internal/...`.
 
 use std::sync::Arc;
@@ -20,7 +24,7 @@ use serde_json::json;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-use crate::agent::Channel;
+use crate::agent::{Channel, Status, Voice};
 use crate::assistant::{Assistant, NOT_UNDERSTOOD};
 use crate::audio;
 use crate::llm::{ChatMessage, Provider, ToolDef};
@@ -109,8 +113,6 @@ async fn voices(State(state): State<AppState>) -> Json<serde_json::Value> {
 struct TalkQuery {
     /// Needed when the key covers several devices.
     device: Option<Uuid>,
-    /// `pcm` (default, raw s16le mono for the ESP32) or `wav`
-    format: Option<String>,
     /// Sample rate of a raw PCM upload, default 16000
     rate: Option<u32>,
 }
@@ -163,39 +165,75 @@ async fn recognize(state: &AppState, body: &[u8], rate: u32) -> ApiResult<String
     Ok(clean_transcript(&text))
 }
 
-/// Speaks each sentence as soon as it is synthesized. Raw PCM by default, WAV with `wav`.
+/// How the spoken answer is sent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AudioFormat {
+    /// For the browser in the admin area.
+    Wav,
+    /// Audio and status frames for the devices, see the module docs.
+    Frames,
+}
+
+const FRAME_AUDIO: u8 = 1;
+const FRAME_STATUS: u8 = 2;
+
+fn frame(kind: u8, payload: &[u8]) -> Bytes {
+    let mut out = Vec::with_capacity(payload.len() + 5);
+    out.push(kind);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    Bytes::from(out)
+}
+
+/// Speaks each sentence as soon as it is synthesized. Statuses only go out as frames.
 fn audio_response(
     tts: Arc<dyn TextToSpeech>,
     speed: f32,
-    sentences: impl futures_util::Stream<Item = String> + Send + 'static,
-    wav: bool,
+    voice: impl futures_util::Stream<Item = Voice> + Send + 'static,
+    format: AudioFormat,
     transcript: Option<&str>,
 ) -> Response {
     let rate = tts.sample_rate();
     let body = async_stream::stream! {
-        if wav {
+        if format == AudioFormat::Wav {
             yield Ok::<Bytes, std::io::Error>(Bytes::from(audio::streaming_wav_header(rate)));
         }
-        let mut sentences = Box::pin(sentences);
-        while let Some(sentence) = sentences.next().await {
+        let mut voice = Box::pin(voice);
+        let mut spoken = false;
+        while let Some(item) = voice.next().await {
+            let sentence = match item {
+                Voice::Say(sentence) => sentence,
+                Voice::Status(status) => {
+                    if format == AudioFormat::Frames {
+                        yield Ok(frame(FRAME_STATUS, status.as_str().as_bytes()));
+                    }
+                    continue;
+                }
+            };
+            if format == AudioFormat::Frames && !spoken {
+                yield Ok(frame(FRAME_STATUS, Status::Speaking.as_str().as_bytes()));
+            }
             let tts = Arc::clone(&tts);
             match tokio::task::spawn_blocking(move || tts.synthesize(&sentence, speed)).await {
-                Ok(Ok(samples)) => yield Ok(Bytes::from(audio::f32_to_s16le(&samples))),
+                Ok(Ok(samples)) => {
+                    spoken = true;
+                    let pcm = audio::f32_to_s16le(&samples);
+                    yield Ok(match format {
+                        AudioFormat::Frames => frame(FRAME_AUDIO, &pcm),
+                        AudioFormat::Wav => Bytes::from(pcm),
+                    });
+                }
                 Ok(Err(e)) => tracing::error!("Sprachausgabe: {e:#}"),
                 Err(e) => tracing::error!("Sprachausgabe: {e}"),
             }
         }
     };
     let mut headers = HeaderMap::new();
-    let content_type = if wav {
-        "audio/wav".to_string()
-    } else {
-        format!("audio/L16; rate={rate}; channels=1")
+    let content_type = match format {
+        AudioFormat::Wav => "audio/wav",
+        AudioFormat::Frames => "application/octet-stream",
     };
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_str(&content_type).unwrap(),
-    );
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert("x-sample-rate", HeaderValue::from(rate));
     if let Some(t) = transcript {
         let encoded = utf8_percent_encode(t, NON_ALPHANUMERIC).to_string();
@@ -220,15 +258,21 @@ async fn talk(
         .await
         .map_err(|e| ApiError(StatusCode::UNAUTHORIZED, format!("{e:#}")))?;
     let tts = voice_of(&state, &device).await?;
-    let wav = q.format.as_deref() == Some("wav");
+    let format = AudioFormat::Frames;
     let text = recognize(&state, &body, q.rate.unwrap_or(audio::STT_RATE)).await?;
     if text.is_empty() {
-        let sentences = futures_util::stream::iter([NOT_UNDERSTOOD.to_string()]);
-        return Ok(audio_response(tts, device.speed, sentences, wav, Some("")));
+        let sentences = futures_util::stream::iter([Voice::Say(NOT_UNDERSTOOD.to_string())]);
+        return Ok(audio_response(
+            tts,
+            device.speed,
+            sentences,
+            format,
+            Some(""),
+        ));
     }
     let speed = device.speed;
     let sentences = Arc::clone(&state.assistant).reply_stream(device, text.clone(), Channel::Voice);
-    Ok(audio_response(tts, speed, sentences, wav, Some(&text)))
+    Ok(audio_response(tts, speed, sentences, format, Some(&text)))
 }
 
 #[derive(Deserialize)]
@@ -286,8 +330,8 @@ async fn device_speak(
     Ok(audio_response(
         tts,
         device.speed,
-        futures_util::stream::iter(sentences),
-        true,
+        futures_util::stream::iter(sentences.into_iter().map(Voice::Say)),
+        AudioFormat::Wav,
         None,
     ))
 }

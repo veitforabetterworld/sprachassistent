@@ -7,7 +7,7 @@ use chrono::Datelike;
 use futures_util::Stream;
 use tokio::sync::mpsc;
 
-use crate::agent::{self, Channel, TurnResult};
+use crate::agent::{self, Channel, TurnResult, Voice};
 use crate::llm::ChatModel;
 use crate::secrets::Secrets;
 use crate::store::{Device, Store};
@@ -64,24 +64,25 @@ pub struct Assistant {
 }
 
 impl Assistant {
-    /// Streams the reply sentence by sentence. A failure yields a spoken apology instead.
+    /// Streams the reply sentence by sentence, with what the assistant is doing in between.
+    /// A failure yields a spoken apology instead.
     pub fn reply_stream(
         self: Arc<Self>,
         device: Device,
         user_text: String,
         channel: Channel,
-    ) -> impl Stream<Item = String> + Send {
+    ) -> impl Stream<Item = Voice> + Send {
         async_stream::stream! {
             let (tx, mut rx) = mpsc::channel(8);
             let assistant = Arc::clone(&self);
             let task = tokio::spawn(async move {
                 assistant.turn(device, user_text, channel, Some(tx)).await
             });
-            while let Some(sentence) = rx.recv().await {
-                yield sentence;
+            while let Some(voice) = rx.recv().await {
+                yield voice;
             }
             if task.await.is_err() {
-                yield NO_ANSWER.to_string();
+                yield Voice::Say(NO_ANSWER.to_string());
             }
         }
     }
@@ -100,7 +101,7 @@ impl Assistant {
         device: Device,
         user_text: String,
         channel: Channel,
-        say: Option<mpsc::Sender<String>>,
+        say: Option<mpsc::Sender<Voice>>,
     ) -> TurnResult {
         agent::run(
             Arc::clone(&self.llm),

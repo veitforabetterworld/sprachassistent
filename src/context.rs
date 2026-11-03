@@ -41,8 +41,11 @@ pub fn attach(messages: &mut [ChatMessage], context: &str) {
     }
 }
 
-/// Streams a reply up to the context block. Text that could still turn into the opening tag
-/// is held back until the next piece shows what it is.
+/// Where speaking stops: the context block, and tool calls some models write as text.
+const STOPS: [&str; 3] = [OPEN, "<tool_call>", "<function="];
+
+/// Streams a reply up to the context block or a tool call written as text. Text that could
+/// still turn into one of them is held back until the next piece shows what it is.
 #[derive(Default)]
 pub struct ReplyCut {
     seen: String,
@@ -58,16 +61,26 @@ impl ReplyCut {
             return String::new();
         }
         let lower = self.seen.to_ascii_lowercase();
-        if let Some(at) = lower[self.passed..].find(OPEN).map(|at| self.passed + at) {
+        let found = STOPS
+            .iter()
+            .filter_map(|stop| lower[self.passed..].find(stop))
+            .min();
+        if let Some(at) = found {
             self.cut = true;
-            return self.pass(at);
+            return self.pass(self.passed + at);
         }
-        // The tag is ASCII, so a suffix that matches its start ends on a char boundary.
-        let held = (1..OPEN.len())
-            .rev()
-            .find(|n| lower.ends_with(&OPEN[..*n]))
+        // The stops are ASCII, so a suffix that matches the start of one ends on a char boundary.
+        let held = STOPS
+            .iter()
+            .filter_map(|stop| (1..stop.len()).rev().find(|n| lower.ends_with(&stop[..*n])))
+            .max()
             .unwrap_or(0);
         self.pass(self.seen.len() - held)
+    }
+
+    /// Whether the reply stopped at a block or a tool call written as text.
+    pub fn was_cut(&self) -> bool {
+        self.cut
     }
 
     /// Whatever was held back, unless it was the block.
@@ -150,6 +163,16 @@ mod tests {
         spoken.push_str(&cut.finish());
         assert_eq!(spoken, "Gut. Mehr weiß ich nicht. ");
         assert!(cut.full().ends_with("[/kontext]"));
+    }
+
+    #[test]
+    fn a_tool_call_written_as_text_is_never_spoken() {
+        let mut cut = ReplyCut::default();
+        let mut spoken = cut.push("Moment. <tool");
+        spoken.push_str(&cut.push("_call>\n<function=web_research>"));
+        spoken.push_str(&cut.finish());
+        assert_eq!(spoken, "Moment. ");
+        assert!(cut.was_cut());
     }
 
     #[test]

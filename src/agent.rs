@@ -48,6 +48,37 @@ impl Channel {
     }
 }
 
+/// What goes to the speaker: sentences to say, and what the assistant is doing in between,
+/// so the device can show it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Voice {
+    Say(String),
+    Status(Status),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    /// The model is writing.
+    Thinking,
+    /// Searching or reading web pages.
+    Research,
+    /// Asking or switching something in the house.
+    Home,
+    /// The first sentence is being turned into speech.
+    Speaking,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Thinking => "thinking",
+            Self::Research => "research",
+            Self::Home => "home",
+            Self::Speaking => "speaking",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TurnResult {
     pub reply: String,
@@ -64,7 +95,7 @@ pub async fn run(
     device: Device,
     user_text: String,
     channel: Channel,
-    say: Option<mpsc::Sender<String>>,
+    say: Option<mpsc::Sender<Voice>>,
 ) -> TurnResult {
     let Some(user_id) = device.user_id else {
         speak(&say, NO_ANSWER).await;
@@ -122,7 +153,7 @@ fn done(run_id: Option<Uuid>, reply: &str, status: &str) -> TurnResult {
     }
 }
 
-async fn fail(say: &Option<mpsc::Sender<String>>, guard: &mut RunGuard, reply: &str) -> TurnResult {
+async fn fail(say: &Option<mpsc::Sender<Voice>>, guard: &mut RunGuard, reply: &str) -> TurnResult {
     speak(say, reply).await;
     let id = guard.id();
     guard.finish(FAILED, reply, reply, 0, 0, 0, None).await;
@@ -188,7 +219,7 @@ async fn stream_reply(
     store: Store,
     secrets: Secrets,
     device: Device,
-    say: Option<mpsc::Sender<String>>,
+    say: Option<mpsc::Sender<Voice>>,
     mut guard: RunGuard,
     messages: Vec<ChatMessage>,
     user_text: &str,
@@ -202,6 +233,7 @@ async fn stream_reply(
     };
     let started = Instant::now();
     let mut cut = ReplyCut::default();
+    show(&say, Status::Thinking).await;
     match llm.stream(&providers, &messages).await {
         Ok(mut tokens) => {
             let mut splitter = SentenceSplitter::default();
@@ -211,7 +243,7 @@ async fn stream_reply(
                         let speakable = cut.push(&piece);
                         if let Some(tx) = &say {
                             for sentence in splitter.push(&speakable) {
-                                if tx.send(sentence).await.is_err() {
+                                if tx.send(Voice::Say(sentence)).await.is_err() {
                                     let reply = context::split(cut.full()).0;
                                     guard
                                         .finish(CANCELLED, &reply, "abgebrochen", 1, 0, 0, None)
@@ -230,10 +262,10 @@ async fn stream_reply(
             if let Some(tx) = &say {
                 let rest = cut.finish();
                 for sentence in splitter.push(&rest) {
-                    let _ = tx.send(sentence).await;
+                    let _ = tx.send(Voice::Say(sentence)).await;
                 }
                 if let Some(rest) = splitter.finish() {
-                    let _ = tx.send(rest).await;
+                    let _ = tx.send(Voice::Say(rest)).await;
                 }
             }
         }
@@ -278,7 +310,7 @@ async fn resume(
     device: Device,
     user_id: i64,
     channel: Channel,
-    say: Option<mpsc::Sender<String>>,
+    say: Option<mpsc::Sender<Voice>>,
     guard: RunGuard,
     pending: crate::store::PendingRun,
     word: Approval,
@@ -367,7 +399,7 @@ async fn drive(
     device: Device,
     user_id: i64,
     channel: Channel,
-    say: Option<mpsc::Sender<String>>,
+    say: Option<mpsc::Sender<Voice>>,
     mut guard: RunGuard,
     mut messages: Vec<ChatMessage>,
     user_text: &str,
@@ -465,7 +497,36 @@ async fn drive(
         };
         // Tools are offered, never forced: a greeting needs none, and a forced call kept the
         // model from ever answering. `complete` moves on to the next model at a limit.
-        let turn_result = llm.complete(&providers, sent, offered, false, false).await;
+        // On the speaker the text is spoken while it arrives, unless a nudge could still send
+        // this first reply back (`nudge_tools`): what was said cannot be taken back.
+        show(&say, Status::Thinking).await;
+        let nudge_possible = phase == PromptPhase::Lookup
+            && !nudged
+            && !gathered
+            && providers.first().is_some_and(|p| p.nudge_tools);
+        let mut spoke = false;
+        let turn_result = match say.as_ref().filter(|_| !nudge_possible) {
+            Some(tx) => {
+                let (result, said, gone) = ask_and_speak(&llm, &providers, sent, offered, tx).await;
+                spoke = said;
+                if gone {
+                    guard
+                        .finish(
+                            CANCELLED,
+                            "",
+                            "abgebrochen",
+                            iterations,
+                            input_tokens,
+                            output_tokens,
+                            None,
+                        )
+                        .await;
+                    return done(Some(guard.id()), "", CANCELLED);
+                }
+                result
+            }
+            None => llm.complete(&providers, sent, offered, false, false).await,
+        };
         let mut turn = match turn_result {
             Ok(turn) => turn,
             Err(e) => {
@@ -548,7 +609,8 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
             if reply.is_empty() {
                 return fail(&say, &mut guard, NO_ANSWER).await;
             }
-            if !speak(&say, &reply).await {
+            // Streamed text has been spoken already.
+            if !spoke && !speak(&say, &reply).await {
                 guard
                     .finish(
                         CANCELLED,
@@ -581,7 +643,8 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
             return done(Some(guard.id()), &reply, COMPLETED);
         }
 
-        if channel == Channel::Voice && !said_busy {
+        // A model that said something before its tool call has filled the pause itself.
+        if channel == Channel::Voice && !said_busy && !spoke {
             said_busy = true;
             if !speak(&say, &device.busy_phrase).await {
                 guard
@@ -653,6 +716,14 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
             }
         }
         let saw_action = kept_action;
+        if kept
+            .iter()
+            .any(|call| tool_kind(&call.name) == ToolKind::Research)
+        {
+            show(&say, Status::Research).await;
+        } else if !kept.is_empty() {
+            show(&say, Status::Home).await;
+        }
         research_steps += research_now + repeated;
         // Asking again for what is already above means the model has what it can get: answer.
         let only_repeats = repeated > 0 && research_now == 0 && !saw_action && !saw_state;
@@ -843,7 +914,7 @@ async fn execute(
     offers: &[ToolOffer],
     calls: Vec<ToolCall>,
     channel: Channel,
-    say: &Option<mpsc::Sender<String>>,
+    say: &Option<mpsc::Sender<Voice>>,
     still: &str,
 ) -> Vec<(ToolCall, String)> {
     let mut out = Vec::new();
@@ -908,7 +979,7 @@ fn confirm_question(calls: &[ToolCall], offers: &[ToolOffer]) -> String {
 }
 
 /// Sends the text as spoken sentences. Returns false when the listener is gone.
-async fn speak(say: &Option<mpsc::Sender<String>>, text: &str) -> bool {
+async fn speak(say: &Option<mpsc::Sender<Voice>>, text: &str) -> bool {
     let Some(tx) = say else {
         return true;
     };
@@ -921,11 +992,52 @@ async fn speak(say: &Option<mpsc::Sender<String>>, text: &str) -> bool {
         parts.push(text.trim().to_string());
     }
     for part in parts {
-        if tx.send(part).await.is_err() {
+        if tx.send(Voice::Say(part)).await.is_err() {
             return false;
         }
     }
     true
+}
+
+/// Tells the speaker what is going on; a listener that is gone notices at the next sentence.
+async fn show(say: &Option<mpsc::Sender<Voice>>, status: Status) {
+    if let Some(tx) = say {
+        let _ = tx.send(Voice::Status(status)).await;
+    }
+}
+
+/// Lets the model write with tools offered and speaks its text while it arrives. A tool call
+/// it writes as text or the context block are never spoken. Returns the turn, whether anything
+/// was spoken and whether the listener went away.
+async fn ask_and_speak(
+    llm: &Arc<dyn ChatModel>,
+    providers: &[crate::llm::Provider],
+    messages: &[ChatMessage],
+    offered: &[ToolDef],
+    tx: &mpsc::Sender<Voice>,
+) -> (anyhow::Result<crate::llm::ModelTurn>, bool, bool) {
+    let (pieces, mut received) = mpsc::channel::<String>(64);
+    let ask = llm.complete_streamed(providers, messages, offered, pieces);
+    let speak_along = async {
+        let mut cut = ReplyCut::default();
+        let mut splitter = SentenceSplitter::default();
+        let (mut spoke, mut gone) = (false, false);
+        while let Some(piece) = received.recv().await {
+            for sentence in splitter.push(&cut.push(&piece)) {
+                spoke = true;
+                gone |= tx.send(Voice::Say(sentence)).await.is_err();
+            }
+        }
+        let mut rest = splitter.push(&cut.finish());
+        rest.extend(splitter.finish());
+        for sentence in rest {
+            spoke = true;
+            gone |= tx.send(Voice::Say(sentence)).await.is_err();
+        }
+        (spoke, gone)
+    };
+    let (turn, (spoke, gone)) = tokio::join!(ask, speak_along);
+    (turn, spoke, gone)
 }
 
 /// Only for models with `nudge_tools` on: their text reply before any tool result may be a
