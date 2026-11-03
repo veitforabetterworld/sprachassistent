@@ -1,6 +1,7 @@
 //! The agent loop shared by the speaker and the admin chat. The channel only changes the system
 //! prompt and whether a busy line is spoken before tools run.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,16 +18,20 @@ use crate::runs::{RunGuard, CANCELLED, COMPLETED, FAILED, WAITING};
 use crate::secrets::Secrets;
 use crate::sentences::SentenceSplitter;
 use crate::store::{Device, Store, StoredMessage};
-use crate::tools::{ToolExecutor, ToolOffer};
+use crate::tools::{ToolExecutor, ToolHints, ToolOffer};
 
 const VOICE_BUDGET: Duration = Duration::from_secs(90);
 const TEXT_BUDGET: Duration = Duration::from_secs(110);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(20);
-/// Reading pages can wait for the headless browser, up to three pages one after another.
-const RESEARCH_TIMEOUT: Duration = Duration::from_secs(45);
+/// Reading from outside (`ToolKind::Explore`) may wait for slow servers, several pages in a row.
+const EXPLORE_TIMEOUT: Duration = Duration::from_secs(45);
 const TOOL_RESULT_CHARS: usize = 2000;
-/// One page with its links, or three shorter ones (`web::FOLLOW_MAX`), fit whole.
-const RESEARCH_RESULT_CHARS: usize = 6000;
+/// What comes from outside is longer, a web page with its links fits whole.
+const EXPLORE_RESULT_CHARS: usize = 6000;
+/// After this many steps reading from outside the model answers from what it has.
+const EXPLORE_STEPS: usize = 4;
+/// The argument in which a tool takes the model's new context, see the tool's guide.
+const CONTEXT_ARG: &str = "kontext";
 const APPROVAL_TTL_SECS: i64 = 600;
 const STILL_BUSY_AFTER: Duration = Duration::from_secs(15);
 const HISTORY_CHARS: usize = 180;
@@ -166,12 +171,15 @@ async fn prompt(
     offers: &[ToolOffer],
 ) -> Vec<ChatMessage> {
     let rules = (device.tools_enabled && !offers.is_empty()).then(|| ToolRules {
-        home: offers
+        writes: offers
             .iter()
-            .any(|offer| tool_kind(&offer.name) != ToolKind::Research),
-        research: offers
+            .any(|offer| tool_kind(offer.hints) == ToolKind::Change),
+        guides: offers
             .iter()
-            .any(|offer| tool_kind(&offer.name) == ToolKind::Research),
+            .map(|offer| offer.guide.trim())
+            .filter(|guide| !guide.is_empty())
+            .map(str::to_string)
+            .collect(),
     });
     let mut messages = vec![ChatMessage::new(
         "system",
@@ -414,17 +422,11 @@ async fn drive(
         }
     };
     let aliases = model_tool_names(offers.iter().map(|offer| offer.name.as_str()));
-    // `call_tool` runs arbitrary Home Assistant tools and skips the policy on the inner call.
+    let kinds = Kinds::new(&offers, &aliases);
+    // Every enabled tool goes to the model. What a chatbot should not use is switched off in
+    // its tool settings, not here.
     let defs: Vec<ToolDef> = offers
         .iter()
-        .filter(|offer| {
-            let name = offer.name.to_ascii_lowercase();
-            // The tool-search server ships multi-kilobyte schemas. Assist intents cover
-            // the spoken commands and stay inside a small token budget.
-            !name.ends_with("call_tool")
-                && !name.contains("ha-mcp-server-tool-search")
-                && !name.contains("broadcast")
-        })
         .map(|offer| ToolDef {
             name: aliases
                 .get(&offer.name)
@@ -451,19 +453,25 @@ async fn drive(
     let mut gathered = false;
     let mut action_misses = 0;
     let mut settle = false;
-    let mut research_steps = 0usize;
-    let mut researched = std::collections::HashSet::new();
-    let mut research_results: Vec<(usize, String, String)> = Vec::new();
-    // The context a research step wrote, kept when the final reply brings none.
-    let mut research_context: Option<String> = None;
+    let can_reread = defs
+        .iter()
+        .any(|tool| kinds.of(&tool.name) == ToolKind::Read);
+    let can_change = defs
+        .iter()
+        .any(|tool| kinds.of(&tool.name) == ToolKind::Change);
+    let mut explore_steps = 0usize;
+    let mut explored = HashSet::new();
+    let mut explore_results: Vec<(usize, String, String)> = Vec::new();
+    // The context a tool call carried, kept when the final reply brings none.
+    let mut written_context: Option<String> = None;
     loop {
         if started.elapsed() > budget || iterations >= limit {
             return fail(&say, &mut guard, TOO_LONG).await;
         }
         iterations += 1;
         // After a tool result the old chat stays out; the context in front of the question
-        // stays. Actions stay available until one has run, so a state lookup can be followed
-        // by the actual device call.
+        // stays. Changes stay available until one has run, so reading the state can be
+        // followed by the change itself.
         let short;
         let sent = if phase == PromptPhase::Lookup && !gathered {
             messages.as_slice()
@@ -474,9 +482,10 @@ async fn drive(
         let offered_owned;
         let offered = match phase {
             PromptPhase::Lookup => {
+                // A change waits for a look at the state, if there is a tool to look with.
                 offered_owned = defs
                     .iter()
-                    .filter(|tool| tool_kind(&tool.name) != ToolKind::Action)
+                    .filter(|tool| kinds.of(&tool.name) != ToolKind::Change || !can_reread)
                     .cloned()
                     .collect::<Vec<_>>();
                 offered_owned.as_slice()
@@ -484,7 +493,9 @@ async fn drive(
             PromptPhase::Act => {
                 offered_owned = defs
                     .iter()
-                    .filter(|tool| tool_kind(&tool.name) == ToolKind::Action)
+                    .filter(|tool| {
+                        matches!(kinds.of(&tool.name), ToolKind::Change | ToolKind::Unknown)
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
                 offered_owned.as_slice()
@@ -589,9 +600,7 @@ Argumente aus dem vorherigen Werkzeugergebnis übernehmen.",
             turn.tool_calls.is_empty(),
             nudged,
             gathered,
-            offered
-                .iter()
-                .any(|tool| tool_kind(&tool.name) != ToolKind::Action),
+            !offered.is_empty(),
         ) {
             nudged = true;
             messages.push(ChatMessage::new(
@@ -603,7 +612,7 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
         }
         if turn.tool_calls.is_empty() {
             let (answer, new_context) = context::split(&turn.content);
-            remember(&store, &device, new_context.or(research_context.take())).await;
+            remember(&store, &device, new_context.or(written_context.take())).await;
             let reply = spoken_reply(&answer);
             if reply.is_empty() {
                 return fail(&say, &mut guard, NO_ANSWER).await;
@@ -673,9 +682,9 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
             };
             let mut exec = call;
             exec.name = offer.name.clone();
-            // The same page or search twice only costs tokens; the first result is still above.
-            if tool_kind(&exec.name) == ToolKind::Research
-                && !researched.insert(research_key(&exec.arguments))
+            // The same request outside twice only costs tokens; the first result is still above.
+            if kinds.of(&exec.name) == ToolKind::Explore
+                && !explored.insert(call_key(&exec.arguments))
             {
                 repeated += 1;
                 finished.push((exec, ALREADY_READ.into()));
@@ -687,23 +696,20 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
                 Effect::Deny => finished.push((exec, "Diese Aktion ist gesperrt.".into())),
             }
         }
-        let saw_final = auto
+        let saw_read = auto
             .iter()
-            .any(|call| tool_kind(&call.name) == ToolKind::FinalLookup);
-        let saw_state = auto
+            .any(|call| kinds.of(&call.name) == ToolKind::Read);
+        let explore_now = auto
             .iter()
-            .any(|call| tool_kind(&call.name) == ToolKind::State);
-        let research_now = auto
-            .iter()
-            .filter(|call| tool_kind(&call.name) == ToolKind::Research)
+            .filter(|call| kinds.of(&call.name) == ToolKind::Explore)
             .count();
-        // One change at a time. A second command to the same device cancels the first
-        // before it has finished moving.
+        // One change at a time. A second change to the same thing can cancel the first
+        // before it has finished.
         let mut kept = Vec::new();
         let mut deferred = Vec::new();
         let mut kept_action = false;
         for call in auto {
-            if tool_kind(&call.name) == ToolKind::Action {
+            if kinds.of(&call.name) == ToolKind::Change {
                 if kept_action {
                     deferred.push(call);
                 } else {
@@ -715,11 +721,11 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
             }
         }
         let saw_action = kept_action;
-        research_steps += research_now + repeated;
+        explore_steps += explore_now + repeated;
         // Asking again for what is already above means the model has what it can get: answer.
-        let only_repeats = repeated > 0 && research_now == 0 && !saw_action && !saw_state;
-        let stop_research =
-            only_repeats || (research_now + repeated > 0 && research_steps >= 4 && !saw_action);
+        let only_repeats = repeated > 0 && explore_now == 0 && !saw_action && !saw_read;
+        let stop_exploring = only_repeats
+            || (explore_now + repeated > 0 && explore_steps >= EXPLORE_STEPS && !saw_action);
         finished.extend(
             execute(
                 &tools,
@@ -733,14 +739,14 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
             .await,
         );
         if saw_action {
-            let failed = finished.iter().any(|(_, body)| {
-                let body = body.to_lowercase();
-                body.starts_with("fehler") || body.contains("no entities matched")
-            });
+            // `execute` marks a failed call this way, also one the MCP server reported.
+            let failed = finished
+                .iter()
+                .any(|(_, body)| body.to_lowercase().starts_with("fehler"));
             if failed && action_misses < 1 {
                 action_misses += 1;
                 phase = PromptPhase::Act;
-            } else if !settle {
+            } else if !settle && can_reread {
                 settle = true;
                 phase = PromptPhase::Lookup;
                 messages.push(ChatMessage::new(
@@ -751,15 +757,17 @@ Lies ihn jetzt erneut. Nenne den Wert aus diesem Lese-Ergebnis, nicht die Zahl, 
             } else {
                 phase = PromptPhase::Answer;
             }
-        } else if stop_research || saw_final {
+        } else if stop_exploring {
             phase = PromptPhase::Answer;
-        } else if research_now > 0 {
+        } else if explore_now > 0 {
             phase = PromptPhase::Lookup;
-        } else if saw_state {
+        } else if saw_read {
             phase = if settle {
                 PromptPhase::Answer
-            } else {
+            } else if can_change {
                 PromptPhase::Act
+            } else {
+                PromptPhase::Lookup
             };
         }
         if !deferred.is_empty() {
@@ -794,16 +802,16 @@ Erst nach dem neuen Lese-Ergebnis einzeln aufrufen, falls es noch nötig ist."
             let _ = store.add_message(device.id, "user", user_text).await;
             user_saved = true;
         }
-        // A new research step carries the model's new context with what it read so far. The
-        // pages themselves then leave the prompt; only the newest result is sent in full.
-        if research_now > 0 {
-            let written = research_context_of(&calls);
-            for (at, label, start) in research_results.drain(..) {
-                messages[at].content = compact_research(&label, &start, written.is_some());
+        // A new step outside carries the model's new context with what it read so far. The
+        // older results then leave the prompt; only the newest one is sent in full.
+        let written = context_of_calls(&calls);
+        if explore_now > 0 {
+            for (at, label, start) in explore_results.drain(..) {
+                messages[at].content = compact_result(&label, &start, written.is_some());
             }
-            if written.is_some() {
-                research_context = written;
-            }
+        }
+        if written.is_some() {
+            written_context = written;
         }
         messages.push(ChatMessage {
             role: "assistant".into(),
@@ -825,13 +833,13 @@ Erst nach dem neuen Lese-Ergebnis einzeln aufrufen, falls es noch nötig ist."
                 .map(String::as_str)
                 .unwrap_or(&call.name);
             let framed = frame_tool_result(label, body);
-            let limit = if tool_kind(&call.name) == ToolKind::Research {
-                research_results.push((
+            let limit = if kinds.of(&call.name) == ToolKind::Explore {
+                explore_results.push((
                     messages.len(),
                     label.to_string(),
                     truncate(body, OLD_RESULT_CHARS),
                 ));
-                RESEARCH_RESULT_CHARS
+                EXPLORE_RESULT_CHARS
             } else {
                 TOOL_RESULT_CHARS
             };
@@ -848,7 +856,7 @@ Erst nach dem neuen Lese-Ergebnis einzeln aufrufen, falls es noch nötig ist."
         if !finished.is_empty() {
             gathered = true;
         }
-        if stop_research {
+        if stop_exploring {
             messages.push(ChatMessage::new(
                 "system",
                 "Keine weiteren Recherche-Schritte. Antworte jetzt aus den Ergebnissen und nenne die Quellen.",
@@ -888,7 +896,7 @@ Erst nach dem neuen Lese-Ergebnis einzeln aufrufen, falls es noch nötig ist."
 
 fn offer_for<'a>(
     offers: &'a [ToolOffer],
-    aliases: &std::collections::HashMap<String, String>,
+    aliases: &HashMap<String, String>,
     called: &str,
 ) -> Option<&'a ToolOffer> {
     offers.iter().find(|offer| {
@@ -912,22 +920,20 @@ async fn execute(
     let mut warned = false;
     for call in calls {
         show(say, Status::Tool(call.name.clone())).await;
-        let schema = offers
-            .iter()
-            .find(|offer| offer.name == call.name)
+        let offer = offers.iter().find(|offer| offer.name == call.name);
+        let schema = offer
             .map(|offer| offer.parameters.clone())
             .unwrap_or_else(|| json!({}));
+        let timeout = match offer.map(|offer| tool_kind(offer.hints)) {
+            Some(ToolKind::Explore) => EXPLORE_TIMEOUT,
+            _ => TOOL_TIMEOUT,
+        };
         let tools = Arc::clone(tools);
         let run = async move {
             let args = serde_json::from_str::<Value>(&call.arguments).unwrap_or(json!({}));
             if let Err(error) = validate_args(&schema, &args) {
                 return (call, format!("Fehler: {error}"));
             }
-            let timeout = if tool_kind(&call.name) == ToolKind::Research {
-                RESEARCH_TIMEOUT
-            } else {
-                TOOL_TIMEOUT
-            };
             match tokio::time::timeout(timeout, tools.execute(user_id, &call.name, args)).await {
                 Ok(Ok(text)) => (call, text),
                 Ok(Err(error)) => (call, format!("Fehler: {error:#}")),
@@ -1070,32 +1076,47 @@ enum PromptPhase {
     Answer,
 }
 
+/// What a tool does, from its MCP annotations only. The phases of a turn follow it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolKind {
-    State,
-    FinalLookup,
-    Research,
-    Action,
+    /// Reads and changes nothing (`readOnlyHint`).
+    Read,
+    /// Reads from outside (`readOnlyHint` and `openWorldHint`): slower, longer results, and
+    /// often several steps one after another.
+    Explore,
+    /// May change something (`readOnlyHint: false`).
+    Change,
+    /// Says nothing about itself: offered in every phase and never assumed to read or change.
+    Unknown,
 }
 
-fn tool_kind(name: &str) -> ToolKind {
-    let name = name.to_ascii_lowercase();
-    if name == "web_research" {
-        return ToolKind::Research;
+fn tool_kind(hints: ToolHints) -> ToolKind {
+    match (hints.read_only, hints.open_world) {
+        (Some(true), Some(true)) => ToolKind::Explore,
+        (Some(true), _) => ToolKind::Read,
+        (Some(false), _) => ToolKind::Change,
+        (None, _) => ToolKind::Unknown,
     }
-    let reads = name
-        .split(['_', '.'])
-        .filter(|part| !part.is_empty())
-        .any(|part| {
-            part.starts_with("get")
-                || part.starts_with("list")
-                || part.starts_with("search")
-                || part.starts_with("read")
-        });
-    if reads {
-        ToolKind::State
-    } else {
-        ToolKind::Action
+}
+
+/// The kind of every offered tool, by its real name and by the name the model sees.
+struct Kinds(HashMap<String, ToolKind>);
+
+impl Kinds {
+    fn new(offers: &[ToolOffer], aliases: &HashMap<String, String>) -> Self {
+        let mut kinds = HashMap::new();
+        for offer in offers {
+            let kind = tool_kind(offer.hints);
+            if let Some(alias) = aliases.get(&offer.name) {
+                kinds.insert(alias.clone(), kind);
+            }
+            kinds.insert(offer.name.clone(), kind);
+        }
+        Self(kinds)
+    }
+
+    fn of(&self, name: &str) -> ToolKind {
+        self.0.get(name).copied().unwrap_or(ToolKind::Unknown)
     }
 }
 
@@ -1122,38 +1143,41 @@ fn recover_text_tool_call(content: &str, defs: &[ToolDef]) -> Option<ToolCall> {
 }
 
 const ALREADY_READ: &str =
-    "Schon gelesen, was davon zählt, steht oben oder in deinem Kontext. Nimm einen anderen Link oder antworte.";
+    "Schon gelesen, was davon zählt, steht oben oder in deinem Kontext. Frag etwas anderes ab oder antworte.";
 
-/// What is left of an older research result when the model has moved on.
+/// What is left of an older result from outside when the model has moved on.
 const OLD_RESULT_CHARS: usize = 400;
 
-/// Arguments of a research call with the order of keys and spacing evened out.
+/// Arguments of a call with the order of keys and spacing evened out.
 /// The context changes with every step and does not make a different request.
-fn research_key(arguments: &str) -> String {
+fn call_key(arguments: &str) -> String {
     serde_json::from_str::<Value>(arguments)
         .map(|mut args| {
             if let Some(map) = args.as_object_mut() {
-                map.remove("kontext");
+                map.remove(CONTEXT_ARG);
             }
             args.to_string()
         })
         .unwrap_or_else(|_| arguments.trim().to_string())
 }
 
-/// The context the model wrote into this turn's research calls, cut to the limit.
-fn research_context_of(calls: &[ToolCall]) -> Option<String> {
+/// The context the model wrote into this turn's tool calls, cut to the limit.
+fn context_of_calls(calls: &[ToolCall]) -> Option<String> {
     let written = calls
         .iter()
-        .filter(|call| tool_kind(&call.name) == ToolKind::Research)
         .filter_map(|call| serde_json::from_str::<Value>(&call.arguments).ok())
-        .filter_map(|args| args.get("kontext")?.as_str().map(|s| s.trim().to_string()))
+        .filter_map(|args| {
+            args.get(CONTEXT_ARG)?
+                .as_str()
+                .map(|s| s.trim().to_string())
+        })
         .rfind(|written| !written.is_empty())?;
     Some(written.chars().take(context::CONTEXT_CHARS).collect())
 }
 
-/// An older research result reduced to a pointer to the new context, or to its start when
-/// the model wrote none.
-fn compact_research(label: &str, start: &str, context_written: bool) -> String {
+/// An older result from outside reduced to a pointer to the new context, or to its start
+/// when the model wrote none.
+fn compact_result(label: &str, start: &str, context_written: bool) -> String {
     if !context_written {
         return frame_tool_result(label, &format!("Älteres Ergebnis, gekürzt:\n{start}"));
     }
@@ -1267,34 +1291,79 @@ mod tests {
         assert!(!provider_failure_reply("Groq: HTTP 401").contains("401"));
     }
 
+    fn hints(read_only: Option<bool>, open_world: Option<bool>) -> ToolHints {
+        ToolHints {
+            read_only,
+            open_world,
+            ..ToolHints::default()
+        }
+    }
+
     #[test]
-    fn state_lookup_is_followed_by_an_action() {
-        assert_eq!(
-            tool_kind("assist__homeassistant__GetLiveContext"),
-            ToolKind::State
+    fn the_kind_comes_from_the_annotations_not_the_name() {
+        assert_eq!(tool_kind(hints(Some(true), None)), ToolKind::Read);
+        assert_eq!(tool_kind(hints(Some(true), Some(false))), ToolKind::Read);
+        assert_eq!(tool_kind(hints(Some(true), Some(true))), ToolKind::Explore);
+        assert_eq!(tool_kind(hints(Some(false), Some(true))), ToolKind::Change);
+        assert_eq!(tool_kind(hints(None, Some(true))), ToolKind::Unknown);
+        let from_row = ToolHints::from_annotations(
+            &json!({"readOnlyHint": true, "destructiveHint": null, "openWorldHint": true}),
         );
-        assert_eq!(tool_kind("web_research"), ToolKind::Research);
+        assert_eq!(tool_kind(from_row), ToolKind::Explore);
         assert_eq!(
-            tool_kind("assist__intent__HassSetPosition"),
-            ToolKind::Action
-        );
-        assert_eq!(tool_kind("calendar_list_events"), ToolKind::State);
-        assert_eq!(tool_kind("files_read"), ToolKind::State);
-        assert_eq!(
-            tool_kind("assist__assist_satellite__HassBroadcast"),
-            ToolKind::Action
+            tool_kind(ToolHints::from_annotations(&json!({}))),
+            ToolKind::Unknown
         );
     }
 
     #[test]
-    fn the_same_research_call_is_recognised_despite_spacing() {
-        let first = research_key(r#"{"action":"follow","url":"https://a.de/x"}"#);
-        let again = research_key(" {\"action\": \"follow\",\n \"url\": \"https://a.de/x\"} ");
-        let other = research_key(r#"{"action":"follow","url":"https://a.de/y"}"#);
+    fn kinds_know_the_name_the_model_sees() {
+        let offer = |name: &str, hints| ToolOffer {
+            name: name.into(),
+            description: String::new(),
+            parameters: json!({}),
+            effect: Effect::Auto,
+            hints,
+            guide: String::new(),
+        };
+        let offers = vec![
+            offer("get_status", hints(Some(false), None)),
+            offer("mail--search", hints(Some(true), Some(true))),
+            offer("send_everything", hints(None, None)),
+        ];
+        let aliases = model_tool_names(offers.iter().map(|offer| offer.name.as_str()));
+        let kinds = Kinds::new(&offers, &aliases);
+        // A name that sounds like reading changes nothing about what the server says.
+        assert_eq!(kinds.of("get_status"), ToolKind::Change);
+        assert_eq!(kinds.of("mail--search"), ToolKind::Explore);
+        assert_eq!(kinds.of(&aliases["mail--search"]), ToolKind::Explore);
+        assert_eq!(kinds.of("send_everything"), ToolKind::Unknown);
+        assert_eq!(kinds.of("never_offered"), ToolKind::Unknown);
+    }
+
+    #[test]
+    fn any_tool_can_carry_the_new_context() {
+        let call = |arguments: &str| ToolCall {
+            id: "a".into(),
+            name: "irgendwas".into(),
+            arguments: arguments.into(),
+            thought_signature: None,
+        };
+        assert_eq!(
+            context_of_calls(&[call(r#"{"kontext":" neu "}"#), call("{}")]).as_deref(),
+            Some("neu")
+        );
+        assert!(context_of_calls(&[call(r#"{"kontext":""}"#)]).is_none());
+    }
+
+    #[test]
+    fn the_same_call_is_recognised_despite_spacing() {
+        let first = call_key(r#"{"action":"follow","url":"https://a.de/x"}"#);
+        let again = call_key(" {\"action\": \"follow\",\n \"url\": \"https://a.de/x\"} ");
+        let other = call_key(r#"{"action":"follow","url":"https://a.de/y"}"#);
         assert_eq!(first, again);
         assert_ne!(first, other);
-        let with_notes =
-            research_key(r#"{"action":"follow","url":"https://a.de/x","kontext":"neu"}"#);
+        let with_notes = call_key(r#"{"action":"follow","url":"https://a.de/x","kontext":"neu"}"#);
         assert_eq!(first, with_notes);
     }
 }

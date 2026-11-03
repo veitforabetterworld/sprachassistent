@@ -124,6 +124,8 @@ fn annotations_json(annotations: Option<&ToolAnnotations>) -> Value {
     json!({
         "readOnlyHint": a.read_only_hint,
         "destructiveHint": a.destructive_hint,
+        "idempotentHint": a.idempotent_hint,
+        "openWorldHint": a.open_world_hint,
     })
 }
 

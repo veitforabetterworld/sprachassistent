@@ -273,12 +273,13 @@ impl Llm {
     }
 }
 
-/// Home Assistant MCP tools ship multi-kilobyte descriptions. Small Groq models reject the
-/// whole request once the input exceeds their tokens-per-minute budget (HTTP 413), and a tool
-/// round needs two such requests inside the same minute.
+/// Some MCP servers ship multi-kilobyte descriptions. Small Groq models reject the whole
+/// request once the input exceeds their tokens-per-minute budget (HTTP 413), and a tool
+/// round needs two such requests inside the same minute. Longer instructions for a tool go
+/// into the system prompt instead, see `ToolOffer::guide`.
 const TOOL_DESCRIPTION_CHARS: usize = 120;
-/// All compact Assist tools go to the model. Only a schema that is still huge after slimming
-/// is left out. Phrasing must not decide which actions the model can see.
+/// All compact tools go to the model. Only a schema that is still huge after slimming is left
+/// out. Phrasing must not decide which tools the model can see.
 const TOOL_BUDGET_CHARS: usize = 6000;
 
 fn tool_function(tool: &ToolDef) -> Value {
@@ -409,15 +410,15 @@ fn select_tools<'a>(tools: &'a [ToolDef], messages: &[ChatMessage]) -> Vec<&'a T
     chosen
 }
 
-/// Groq answers HTTP 400 when the model invents a tool name (`assist_home Dover`) or prints
-/// the call as text. Keep the arguments when the body still contains them.
+/// Groq answers HTTP 400 when the model invents a tool name (`light_kitch on`), prints the
+/// call as text or sends arguments that miss the schema. Keep the arguments when the body
+/// still contains them; a call with bad arguments goes out empty, and the schema check sends
+/// the model what is missing.
 fn salvage_tool_call(error: &str, tools: &[ToolDef]) -> Option<ToolCall> {
-    if error.contains("parameters for tool web_search")
-        && tools.iter().any(|tool| tool.name == "web_search")
-    {
+    if let Some(tool) = tool_with_bad_parameters(error, tools) {
         return Some(ToolCall {
             id: "salvage".into(),
-            name: "web_search".into(),
+            name: tool.name.clone(),
             arguments: "{}".into(),
             thought_signature: None,
         });
@@ -425,10 +426,10 @@ fn salvage_tool_call(error: &str, tools: &[ToolDef]) -> Option<ToolCall> {
     let inline = inline_tool_call(error);
     if let Some(mut call) = inline.clone() {
         if let Some(name) = match_tool_name(&call.name, tools) {
-            call.name = name;
             if call.arguments == "{}" {
-                call.arguments = arguments_near(error);
+                call.arguments = arguments_near(error, tool_named(tools, &name));
             }
+            call.name = name;
             return Some(call);
         }
     }
@@ -436,7 +437,7 @@ fn salvage_tool_call(error: &str, tools: &[ToolDef]) -> Option<ToolCall> {
     let arguments = inline
         .map(|call| call.arguments)
         .filter(|args| args != "{}")
-        .unwrap_or_else(|| arguments_near(error));
+        .unwrap_or_else(|| arguments_near(error, tool_named(tools, &name)));
     Some(ToolCall {
         id: "salvage".into(),
         name,
@@ -445,12 +446,33 @@ fn salvage_tool_call(error: &str, tools: &[ToolDef]) -> Option<ToolCall> {
     })
 }
 
-fn arguments_near(error: &str) -> String {
+/// `parameters for tool <name> did not match schema`, for an offered tool.
+fn tool_with_bad_parameters<'a>(error: &str, tools: &'a [ToolDef]) -> Option<&'a ToolDef> {
+    let marker = "parameters for tool ";
+    let rest = &error[error.find(marker)? + marker.len()..];
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .collect();
+    tool_named(tools, &name)
+}
+
+fn tool_named<'a>(tools: &'a [ToolDef], name: &str) -> Option<&'a ToolDef> {
+    tools.iter().find(|tool| tool.name == name)
+}
+
+/// The values of the tool's own parameters that still stand in the error body.
+fn arguments_near(error: &str, tool: Option<&ToolDef>) -> String {
     let error = unescape_jsonish(error);
     let mut args = serde_json::Map::new();
-    for key in ["position", "name", "area"] {
-        if let Some(value) = field_near(&error, key) {
-            args.insert(key.to_string(), value);
+    let keys = tool
+        .and_then(|tool| tool.parameters.get("properties"))
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    for key in keys {
+        if let Some(value) = field_near(&error, &key) {
+            args.insert(key, value);
         }
     }
     Value::Object(args).to_string()
@@ -543,7 +565,7 @@ fn match_tool_name(attempt: &str, tools: &[ToolDef]) -> Option<String> {
     salvage_tool_name(&format!("attempted to call tool '{attempt}'"), tools)
 }
 
-/// Groq answers HTTP 400 when the model invents a tool name (`assist_home Dover`). If that
+/// Groq answers HTTP 400 when the model invents a tool name (`light_kitch on`). If that
 /// string still matches exactly one offered tool by a long common prefix, use that tool.
 fn salvage_tool_name(error: &str, tools: &[ToolDef]) -> Option<String> {
     let marker = "attempted to call tool '";
@@ -1388,7 +1410,10 @@ mod tests {
         let tools = vec![ToolDef {
             name: "assist_intent_HassSetPosition".into(),
             description: String::new(),
-            parameters: json!({}),
+            parameters: json!({"type": "object", "properties": {
+                "position": {"type": "integer"},
+                "name": {"type": "string"}
+            }}),
         }];
         let error = "attempted to call tool 'assist_intent_HassSetPos' which was not in request.tools position\\\":70 name\\\":Rolladen";
         let call = salvage_tool_call(error, &tools).unwrap();
@@ -1402,11 +1427,41 @@ mod tests {
         let tools = vec![ToolDef {
             name: "assist_homeassistant_GetLiveContext".into(),
             description: String::new(),
-            parameters: json!({}),
+            parameters: json!({"type": "object", "properties": {"area": {"type": "string"}}}),
         }];
         let error = "attempted to call tool 'assist_homeassistant_GetLive' which was not \\u003cparameter=area\\u003eBüro\\u003c/parameter\\u003e";
         let call = salvage_tool_call(error, &tools).unwrap();
         assert!(call.arguments.contains("Büro"));
         assert!(!call.arguments.contains("u003e"));
+    }
+
+    #[test]
+    fn salvage_reads_the_keys_from_the_schema() {
+        let tools = vec![ToolDef {
+            name: "mail_search_messages".into(),
+            description: String::new(),
+            parameters: json!({"type": "object", "properties": {"folder": {"type": "string"}}}),
+        }];
+        let error = "attempted to call tool 'mail_search_mess' which was not in request.tools position\\\":70 folder\\\":Rechnungen";
+        let call = salvage_tool_call(error, &tools).unwrap();
+        assert_eq!(call.name, "mail_search_messages");
+        assert!(call.arguments.contains("Rechnungen"));
+        // A key the tool does not have is not made up.
+        assert!(!call.arguments.contains("\"position\""));
+    }
+
+    #[test]
+    fn bad_parameters_go_out_empty_for_any_offered_tool() {
+        let tools = vec![ToolDef {
+            name: "kb.lookup".into(),
+            description: String::new(),
+            parameters: json!({"type": "object"}),
+        }];
+        let error = "HTTP 400: tool call validation failed: parameters for tool kb.lookup did not match schema";
+        let call = salvage_tool_call(error, &tools).unwrap();
+        assert_eq!(call.name, "kb.lookup");
+        assert_eq!(call.arguments, "{}");
+        let unknown = "parameters for tool other_tool did not match schema";
+        assert!(salvage_tool_call(unknown, &tools).is_none());
     }
 }

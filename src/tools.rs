@@ -43,12 +43,41 @@ impl RateGate {
 }
 const SEARCH_LIMIT: usize = 5;
 
+/// Goes into the system prompt while `web_research` is offered.
+const RESEARCH_GUIDE: &str = "Nachrichten holst du mit web_research und action news, Webseiten mit action search, Seiten lesen mit action follow. follow nimmt eine url oder bis zu drei urls auf einmal, aus der Suche oder aus den Links am Ende einer gelesenen Seite. Folge den Links, die zur Frage passen, bis sie beantwortet ist. Schreibe ab dem zweiten Schritt in kontext deinen neuen Kontext mit dem, was du bisher gefunden hast; ältere Seiten bekommst du danach nicht mehr zu sehen. Fasse die Ereignisse zusammen und nenne die Quelle. Sage nicht, es gäbe nur Links.";
+
 #[derive(Debug, Clone)]
 pub struct ToolOffer {
     pub name: String,
     pub description: String,
     pub parameters: Value,
     pub effect: Effect,
+    pub hints: ToolHints,
+    /// How to use the tool, longer than the description the model gets with the call schema.
+    /// It goes into the system prompt while the tool is offered.
+    pub guide: String,
+}
+
+/// The MCP tool annotations. Unset means unknown: nothing is guessed from the name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ToolHints {
+    pub read_only: Option<bool>,
+    pub destructive: Option<bool>,
+    pub idempotent: Option<bool>,
+    pub open_world: Option<bool>,
+}
+
+impl ToolHints {
+    /// From the `annotations` column, `{"readOnlyHint": true, ...}`.
+    pub fn from_annotations(annotations: &Value) -> Self {
+        let hint = |key: &str| annotations.get(key).and_then(Value::as_bool);
+        Self {
+            read_only: hint("readOnlyHint"),
+            destructive: hint("destructiveHint"),
+            idempotent: hint("idempotentHint"),
+            open_world: hint("openWorldHint"),
+        }
+    }
 }
 
 #[async_trait]
@@ -102,7 +131,15 @@ impl LiveTools {
 #[async_trait]
 impl ToolExecutor for LiveTools {
     async fn list(&self, user_id: i64) -> Result<Vec<ToolOffer>> {
-        let mut offers = vec![native_offer(
+        let mut offers = vec![ToolOffer {
+            hints: ToolHints {
+                read_only: Some(true),
+                destructive: Some(false),
+                idempotent: Some(true),
+                open_world: Some(true),
+            },
+            guide: RESEARCH_GUIDE.into(),
+            ..native_offer(
             "web_research",
             "Internetrecherche. action ist news, search oder follow. news: Schlagzeilen, query optional. \
 search: Websuche, query nötig. follow: eine https-Seite lesen (url) oder bis zu drei auf einmal (urls). \
@@ -132,7 +169,8 @@ bisher Gefundenen schreiben; ältere Ergebnisse fallen danach weg. Nicht für Ge
                     }
                 }
             }),
-        )];
+        )
+        }];
         for row in self.store.mcp_tools_for(user_id).await? {
             offers.push(offer_from_row(row));
         }
@@ -189,6 +227,8 @@ fn native_offer(name: &str, description: &str, parameters: Value) -> ToolOffer {
         description: description.into(),
         parameters,
         effect: Effect::Auto,
+        hints: ToolHints::default(),
+        guide: String::new(),
     }
 }
 
@@ -199,10 +239,12 @@ fn offer_from_row(row: ToolRow) -> ToolOffer {
         .and_then(Effect::parse)
         .unwrap_or_else(|| default_effect_from_row(&row));
     ToolOffer {
+        hints: ToolHints::from_annotations(&row.annotations),
         name: row.name,
         description: row.description,
         parameters: row.input_schema,
         effect,
+        guide: String::new(),
     }
 }
 

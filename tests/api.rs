@@ -22,7 +22,7 @@ use sprachassistent::llm::{ChatMessage, ChatModel, ModelTurn, Provider, TokenStr
 use sprachassistent::secrets::Secrets;
 use sprachassistent::speech::{SpeechToText, TextToSpeech, Transcription, VoiceBank};
 use sprachassistent::store::{hash_api_key, Store};
-use sprachassistent::tools::{EmptyTools, ToolExecutor, ToolOffer};
+use sprachassistent::tools::{EmptyTools, ToolExecutor, ToolHints, ToolOffer};
 
 const PEPPER: &str = "test-pepper";
 const VOICE: &str = "vits-piper-de_DE-test-medium";
@@ -95,6 +95,8 @@ impl FakeLlm {
 struct ScriptTools {
     name: &'static str,
     effect: Effect,
+    hints: ToolHints,
+    guide: &'static str,
     calls: Mutex<u32>,
 }
 
@@ -106,6 +108,8 @@ impl ToolExecutor for ScriptTools {
             description: "Wiederholt einen Text.".into(),
             parameters: json!({"type":"object","properties":{"text":{"type":"string"}}}),
             effect: self.effect,
+            hints: self.hints,
+            guide: self.guide.into(),
         }])
     }
 
@@ -514,12 +518,24 @@ fn tool_turn(call: bool, text: &str) -> ModelTurn {
 }
 
 async fn tool_setup(effect: Effect) -> Option<(Setup, Arc<ScriptTools>, Uuid, String)> {
-    named_tool_setup("echo", effect).await
+    named_tool_setup("echo", effect, ToolHints::default(), "").await
+}
+
+/// Reads from outside, like the built-in internet research.
+async fn research_setup() -> Option<(Setup, Arc<ScriptTools>, Uuid, String)> {
+    let hints = ToolHints {
+        read_only: Some(true),
+        open_world: Some(true),
+        ..ToolHints::default()
+    };
+    named_tool_setup("web_research", Effect::Auto, hints, "").await
 }
 
 async fn named_tool_setup(
     tool: &'static str,
     effect: Effect,
+    hints: ToolHints,
+    guide: &'static str,
 ) -> Option<(Setup, Arc<ScriptTools>, Uuid, String)> {
     let s = setup().await?;
     let owner = s.user(false).await;
@@ -543,6 +559,8 @@ async fn named_tool_setup(
     let tools = Arc::new(ScriptTools {
         name: tool,
         effect,
+        hints,
+        guide,
         calls: Mutex::new(0),
     });
     let llm = Arc::new(FakeLlm::default());
@@ -594,7 +612,7 @@ fn research_turn() -> ModelTurn {
 
 #[tokio::test]
 async fn small_talk_is_answered_at_once_without_nudge() {
-    let Some((s, tools, device, _)) = named_tool_setup("web_research", Effect::Auto).await else {
+    let Some((s, tools, device, _)) = research_setup().await else {
         return;
     };
     s.llm.push(tool_turn(false, "Hallo!"));
@@ -614,7 +632,7 @@ async fn small_talk_is_answered_at_once_without_nudge() {
 
 #[tokio::test]
 async fn a_model_with_nudge_gets_its_first_reply_back_once_never_forced() {
-    let Some((s, tools, device, _)) = named_tool_setup("web_research", Effect::Auto).await else {
+    let Some((s, tools, device, _)) = research_setup().await else {
         return;
     };
     s.llm.push(ModelTurn {
@@ -639,7 +657,7 @@ async fn a_model_with_nudge_gets_its_first_reply_back_once_never_forced() {
 
 #[tokio::test]
 async fn asking_again_for_the_same_research_ends_in_an_answer() {
-    let Some((s, tools, device, _)) = named_tool_setup("web_research", Effect::Auto).await else {
+    let Some((s, tools, device, _)) = research_setup().await else {
         return;
     };
     s.llm.push(research_turn());
@@ -658,7 +676,7 @@ async fn asking_again_for_the_same_research_ends_in_an_answer() {
 
 #[tokio::test]
 async fn older_pages_leave_the_prompt_once_the_model_wrote_its_context() {
-    let Some((s, tools, device, _)) = named_tool_setup("web_research", Effect::Auto).await else {
+    let Some((s, tools, device, _)) = research_setup().await else {
         return;
     };
     s.llm.push(research_turn());
@@ -700,7 +718,7 @@ async fn older_pages_leave_the_prompt_once_the_model_wrote_its_context() {
 
 #[tokio::test]
 async fn a_reply_with_tools_keeps_its_block_as_context_and_out_of_the_reply() {
-    let Some((s, _, device, _)) = named_tool_setup("web_research", Effect::Auto).await else {
+    let Some((s, _, device, _)) = research_setup().await else {
         return;
     };
     s.store.set_context(device, "Alt").await.unwrap();
@@ -892,4 +910,81 @@ async fn a_run_stays_on_the_provider_that_answered() {
     // The one that answered goes first; the others stay behind it for a limit or an outage.
     assert_eq!(seen[1].0[0], first[0]);
     assert_eq!(seen[1].0.len(), first.len());
+}
+
+#[tokio::test]
+async fn any_enabled_tool_is_offered_and_brings_its_guide() {
+    // A name that once was filtered, without annotations: offered like any other tool.
+    let Some((s, tools, device, _)) = named_tool_setup(
+        "server__call_tool",
+        Effect::Auto,
+        ToolHints::default(),
+        "Rufe server__call_tool nur mit einem Namen aus der Liste auf.",
+    )
+    .await
+    else {
+        return;
+    };
+    s.llm.push(ModelTurn {
+        tool_calls: vec![ToolCall {
+            id: "u1".into(),
+            name: "server_call_tool".into(),
+            arguments: "{}".into(),
+            thought_signature: None,
+        }],
+        ..ModelTurn::default()
+    });
+    s.llm.push(tool_turn(false, "Fertig."));
+    let reply = chat(&s, device, "Mach was").await;
+    assert_eq!(reply["reply"], "Fertig.");
+    assert_eq!(*tools.calls.lock().unwrap(), 1);
+    // A tool that says nothing about itself stays on offer after it ran.
+    assert_eq!(
+        s.llm
+            .offered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(n, _)| *n)
+            .collect::<Vec<_>>(),
+        vec![1, 1]
+    );
+    let seen = s.llm.seen.lock().unwrap();
+    let system = &seen[0].1[0].content;
+    assert!(system.contains("nur mit einem Namen aus der Liste"));
+    assert!(!system.contains("Lesewerkzeug"));
+}
+
+#[tokio::test]
+async fn a_tool_that_changes_something_brings_the_rules_for_changes() {
+    let hints = ToolHints {
+        read_only: Some(false),
+        ..ToolHints::default()
+    };
+    let Some((s, tools, device, _)) = named_tool_setup("get_lamp", Effect::Auto, hints, "").await
+    else {
+        return;
+    };
+    s.llm.push(ModelTurn {
+        tool_calls: vec![ToolCall {
+            id: "a1".into(),
+            name: "get_lamp".into(),
+            arguments: "{}".into(),
+            thought_signature: None,
+        }],
+        ..ModelTurn::default()
+    });
+    s.llm.push(tool_turn(false, "Lampe ist an."));
+    let reply = chat(&s, device, "Mach die Lampe an").await;
+    assert_eq!(reply["reply"], "Lampe ist an.");
+    assert_eq!(*tools.calls.lock().unwrap(), 1);
+    // `get_` in the name does not make it a read. With nothing to read the state, the change
+    // is offered at once and the model answers after it ran.
+    let offered = s.llm.offered.lock().unwrap();
+    assert_eq!(
+        offered.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        vec![1, 0]
+    );
+    let seen = s.llm.seen.lock().unwrap();
+    assert!(seen[0].1[0].content.contains("Lesewerkzeug"));
 }
