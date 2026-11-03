@@ -1,4 +1,6 @@
 // Sprachassistent-Client: Taster halten und sprechen, loslassen, Antwort hoeren.
+// Mit Wake Word (Env giraffe/computer, siehe wakeword.h) auch: Wort sagen, sprechen, nach einer
+// kurzen Pause endet die Aufnahme von selbst.
 //
 // Waehrend der Taster gedrueckt ist, wird das Mikrofon als 16 kHz / 16 Bit mono an POST /v1/talk
 // gestreamt (chunked). Der Server antwortet in Rahmen: 1 Byte Art, 4 Byte Laenge (little endian),
@@ -6,6 +8,10 @@
 // ueber den MAX98357A abgespielt; Art 2 ist ein Status (thinking, tool:<Name>, speaking), den die
 // LED zeigt, bis der Assistent spricht. Was ein Werkzeug tut, weiss der ESP nicht: jeder Chatbot hat
 // andere; der Name steht nur im seriellen Protokoll.
+//
+// Der Motor (z. B. der Kopf einer Laber-Giraffe) laeuft, solange der Server arbeitet: vom Loslassen
+// bis zum ersten Ton und wieder nach jedem Status, der nach Audio kommt ("Einen Moment bitte" und
+// dann das Werkzeug). Er steht, bis der I2S-Puffer leer gespielt ist: nie sprechen und bewegen.
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -14,6 +20,7 @@
 #include <freertos/stream_buffer.h>
 
 #include "secrets.h"
+#include "wakeword.h"
 
 // INMP441: VDD 3.3V, GND, L/R an GND (linker Kanal)
 constexpr int MIC_SCK = 32;
@@ -30,6 +37,8 @@ constexpr int BUTTON = 5;
 constexpr int LED = 2;
 constexpr int RGB_LED_PIN = 16;
 constexpr int RGB_LEVEL = 80;  // 0..255
+// Motor ueber einen Logic-Level-MOSFET (Gate an diesem Pin, HIGH = laeuft); -1 = kein Motor.
+constexpr int MOTOR_PIN = 4;
 
 constexpr i2s_port_t MIC_PORT = I2S_NUM_0;
 constexpr i2s_port_t AMP_PORT = I2S_NUM_1;
@@ -42,8 +51,25 @@ constexpr uint32_t MAX_RECORD_MS = 20000;
 // Puffert ca. 1,5 s Audio, waehrend die Verbindung (TLS-Handshake) aufgebaut wird.
 constexpr size_t AUDIO_BUFFER_BYTES = 64 * 1024;
 
+// Nach dem Wake Word: Aufnahme endet nach so viel Stille, oder wenn gar nichts gesagt wird.
+constexpr uint32_t SILENCE_END_MS = 800;
+constexpr uint32_t NO_SPEECH_MS = 5000;
+// Nach der eigenen Antwort so lange nicht auf das Wake Word hoeren.
+constexpr uint32_t WAKE_LOCKOUT_MS = 500;
+
 static StreamBufferHandle_t audioBuffer;
 static volatile bool recording = false;
+// Wake Word: micTask hoert nur, solange wakeListening gesetzt ist; wakeBusy waehrend einer Inferenz.
+static volatile bool wakeListening = false;
+static volatile bool wakeBusy = false;
+static volatile bool wakeTriggered = false;
+// Sprache in der laufenden Aufnahme (fuer das Ende nach dem Wake Word).
+static volatile bool voiceSeen = false;
+static volatile uint32_t lastVoiceMs = 0;
+static volatile float noiseLevel = 50;
+
+// Blockpegel (RMS), ab dem in der Aufnahme Sprache angenommen wird
+static float voiceThreshold() { return max(noiseLevel * 4, 200.0f); }
 // Fuer das Protokoll: verworfene Bytes (Puffer voll) und hoechster Pegel der Aufnahme.
 static volatile size_t droppedBytes = 0;
 static volatile int32_t peakLevel = 0;
@@ -55,14 +81,14 @@ static WiFiClient client;
 #endif
 
 // ---------- LED ----------
-// Aufnahme: an (RGB rot). KI denkt: pulsiert langsam (blau). Ein Werkzeug laeuft: pulsiert schnell
+// Aufnahme: an (RGB rot, nach dem Wake Word gruen). KI denkt: pulsiert langsam (blau). Ein Werkzeug laeuft: pulsiert schnell
 // (tuerkis). Sprache wird erzeugt: flackert (violett). WLAN-Suche: blinkt (gelb). Waehrend der
 // Assistent spricht und sonst: aus.
 // Fehler, auch an der einfarbigen LED zu unterscheiden: Server nicht erreichbar oder keine Antwort:
 // 5x kurz (rot). Schluessel abgelehnt (401/403/404): 3x lang (orange). Anderer Serverfehler: 3x kurz (rot).
 // Spracherkennung aus oder nichts verstanden sagt der Server selbst an.
 
-enum class LedState { Off, On, Recording, Thinking, Tool, Speaking, Connecting };
+enum class LedState { Off, On, Recording, Listening, Thinking, Tool, Speaking, Connecting };
 
 // Sanftes Pulsieren mit der Periode `periodMs`, Helligkeit 15..255.
 static uint8_t pulse(uint32_t periodMs) {
@@ -87,6 +113,9 @@ static void ledTask(void*) {
     switch (ledState) {
       case LedState::Recording:
         showLed(255, 255, 0, 0);
+        break;
+      case LedState::Listening:
+        showLed(255, 0, 255, 0);
         break;
       case LedState::Thinking: {
         uint8_t v = pulse(1200);
@@ -122,6 +151,30 @@ static void setupLed() {
   ledcSetup(LED_CHANNEL, 5000, 8);
   ledcAttachPin(LED, LED_CHANNEL);
   xTaskCreatePinnedToCore(ledTask, "led", 2048, nullptr, 1, nullptr, 0);
+}
+
+// ---------- Motor ----------
+
+static volatile bool motorWanted = false;
+// Bis dahin spielt der I2S-Puffer noch Audio, siehe playBytes().
+static volatile uint32_t audioUntil = 0;
+// Bytes im DMA-Puffer des Verstaerkers (8 x 512 Frames, 4 Byte pro Frame).
+constexpr uint32_t AMP_DMA_FRAMES = 8 * 512;
+static uint32_t ampRate = 22050;
+
+static void motorTask(void*) {
+  for (;;) {
+    bool run = motorWanted && (int32_t)(millis() - audioUntil) >= 0;
+    digitalWrite(MOTOR_PIN, run ? HIGH : LOW);
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+static void setupMotor() {
+  if (MOTOR_PIN < 0) return;
+  pinMode(MOTOR_PIN, OUTPUT);
+  digitalWrite(MOTOR_PIN, LOW);
+  xTaskCreatePinnedToCore(motorTask, "motor", 2048, nullptr, 1, nullptr, 0);
 }
 
 // ---------- I2S ----------
@@ -171,22 +224,59 @@ static void setupAmp() {
   ESP_ERROR_CHECK(i2s_set_pin(AMP_PORT, &pins));
 }
 
-// Liest das Mikrofon dauerhaft; nur waehrend der Aufnahme landet das Audio im Puffer.
+// Liest das Mikrofon dauerhaft; nur waehrend der Aufnahme landet das Audio im Puffer. Sonst hoert
+// es auf das Wake Word.
 static void micTask(void*) {
   static int32_t raw[256];
   static int16_t pcm[256];
   for (;;) {
     size_t bytesRead = 0;
     i2s_read(MIC_PORT, raw, sizeof(raw), &bytesRead, portMAX_DELAY);
-    if (!recording) continue;
     size_t n = bytesRead / sizeof(int32_t);
+    for (size_t i = 0; i < n; i++) pcm[i] = (int16_t)constrain(raw[i] >> MIC_SHIFT, -32768, 32767);
+
+    // Pegel des Blocks (16 ms): Grundrauschen im Leerlauf mitfuehren, in der Aufnahme Sprache erkennen
+    float sum = 0;
+    for (size_t i = 0; i < n; i++) sum += (float)pcm[i] * pcm[i];
+    float rms = n ? sqrtf(sum / n) : 0;
+
+    if (!recording) {
+      // Grundrauschen: faellt schnell, steigt nur langsam (~30 s). Sonst treiben das Wake Word selbst
+      // und die Antwort aus dem Lautsprecher den Wert hoch, und normale Sprache gilt danach als Stille.
+      if ((int32_t)(millis() - audioUntil) >= 0) {
+        noiseLevel += (rms - noiseLevel) * (rms < noiseLevel ? 0.05f : 0.0005f);
+        noiseLevel = max((float)noiseLevel, 10.0f);
+      }
+      if (USE_WAKEWORD && wakeListening) {
+        wakeBusy = true;
+        if (wakeListening && wakewordFeed(pcm, n)) {
+          wakeTriggered = true;
+          wakeListening = false;
+        }
+        wakeBusy = false;
+      }
+      continue;
+    }
+    if (rms > voiceThreshold()) {
+      voiceSeen = true;
+      lastVoiceMs = millis();
+    }
     for (size_t i = 0; i < n; i++) {
-      pcm[i] = (int16_t)constrain(raw[i] >> MIC_SHIFT, -32768, 32767);
       if (abs(pcm[i]) > peakLevel) peakLevel = abs(pcm[i]);
     }
     size_t bytes = n * sizeof(int16_t);
     droppedBytes += bytes - xStreamBufferSend(audioBuffer, pcm, bytes, 0);  // voll = verwerfen
   }
+}
+
+static bool wakeReady = false;
+static uint32_t listenAfter = 0;
+
+// Haelt die Wake-Word-Erkennung an und gibt ihren Speicher fuer TLS frei.
+static void stopListening() {
+  wakeListening = false;
+  while (wakeBusy) delay(1);
+  if (USE_WAKEWORD && wakeReady) wakewordUnload();
 }
 
 // ---------- Wiedergabe ----------
@@ -201,6 +291,8 @@ static void playBytes(const uint8_t* data, size_t len) {
   auto flush = [&]() {
     size_t written;
     i2s_write(AMP_PORT, stereo, frames * 4, &written, portMAX_DELAY);
+    // Nach dem Schreiben ist der DMA-Puffer hoechstens voll; 50 ms Reserve.
+    audioUntil = millis() + AMP_DMA_FRAMES * 1000 / ampRate + 50;
     frames = 0;
   };
   auto push = [&](int16_t s) {
@@ -303,10 +395,12 @@ static bool readExact(uint8_t* buf, size_t len, uint32_t timeoutMs) {
 constexpr uint8_t FRAME_AUDIO = 1;
 constexpr uint8_t FRAME_STATUS = 2;
 
+// Jeder Status heisst: der Server arbeitet (auch "speaking", dann erzeugt er die Sprache).
 static void showStatus(const char* status) {
   if (!strcmp(status, "thinking")) ledState = LedState::Thinking;
   else if (!strncmp(status, "tool:", 5)) ledState = LedState::Tool;
   else if (!strcmp(status, "speaking")) ledState = LedState::Speaking;
+  motorWanted = true;
   Serial.printf("[%lu ms] %s\n", (unsigned long)millis(), status);
 }
 
@@ -329,6 +423,7 @@ static void playFrames() {
       if (!spoke) Serial.printf("[%lu ms] spricht\n", (unsigned long)millis());
       spoke = true;
       ledState = LedState::Off;  // der Assistent spricht
+      motorWanted = false;
     }
     // Audio abspielen, Unbekanntes ueberspringen.
     while (len > 0) {
@@ -365,6 +460,7 @@ static void playResponse() {
   String line;
   // Wartet auf Spracherkennung und den ersten Satz der Antwort.
   if (!readLine(line, 60000)) {
+    motorWanted = false;
     Serial.println("Keine Antwort vom Server");
     blinkUnreachable();
     return;
@@ -382,6 +478,7 @@ static void playResponse() {
     if (lower.startsWith("x-transcript:")) Serial.printf("Erkannt (URL-kodiert): %s\n", line.substring(13).c_str());
   }
   if (status != 200) {
+    motorWanted = false;
     Serial.printf("HTTP %d\n", status);
     // Der Koerper ist { "code": ..., "detail": ... }, siehe src/failure.rs.
     while (readLine(line, 2000)) Serial.println(line);
@@ -391,20 +488,25 @@ static void playResponse() {
   }
 
   i2s_set_clk(AMP_PORT, rate, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO);
+  ampRate = rate > 0 ? rate : 22050;
   hasCarry = false;
   bodyChunked = chunked;
   bodyLeft = chunked ? 0 : contentLength;
   bodyDone = !chunked && contentLength == 0;
   playFrames();
+  motorWanted = false;
   ledState = LedState::Off;
   i2s_zero_dma_buffer(AMP_PORT);
 }
 
-static void conversation() {
-  ledState = LedState::Recording;
+// byWake: nach dem Wake Word gestartet, endet bei Stille statt beim Loslassen des Tasters.
+static void conversation(bool byWake) {
+  stopListening();
+  ledState = byWake ? LedState::Listening : LedState::Recording;
   xStreamBufferReset(audioBuffer);
   droppedBytes = 0;
   peakLevel = 0;
+  voiceSeen = false;
   recording = true;
   uint32_t start = millis();
 
@@ -430,7 +532,10 @@ static void conversation() {
   size_t sent = 0;
   uint32_t pressed = 0;
   for (;;) {
-    if (recording && (digitalRead(BUTTON) == HIGH || millis() - start > MAX_RECORD_MS)) {
+    bool done = byWake ? (voiceSeen && millis() - lastVoiceMs > SILENCE_END_MS) ||
+                             (!voiceSeen && millis() - start > NO_SPEECH_MS)
+                       : digitalRead(BUTTON) == HIGH;
+    if (recording && (done || millis() - start > MAX_RECORD_MS)) {
       recording = false;
       pressed = millis() - start;
     }
@@ -444,15 +549,28 @@ static void conversation() {
   }
   client.print("0\r\n\r\n");
   ledState = LedState::Thinking;
-  Serial.printf("[%lu ms] losgelassen\n", (unsigned long)millis());
+  motorWanted = true;
+  Serial.printf("[%lu ms] %s\n", (unsigned long)millis(), byWake ? "Aufnahme beendet (Stille)" : "losgelassen");
   Serial.printf(
-      "Taster %.1f s gedrueckt, %.1f s Audio gesendet, %.1f s verworfen, Spitzenpegel %d/32767, "
+      "Aufnahme %.1f s, %.1f s Audio gesendet, %.1f s verworfen, Spitzenpegel %d/32767, "
       "Verbindung nach %u ms\n",
       pressed / 1000.0, sent / 2.0 / MIC_RATE, droppedBytes / 2.0 / MIC_RATE, (int)peakLevel,
       (unsigned)connectMs);
+  if (byWake) {
+    Serial.printf("Rauschen %.0f, Sprachschwelle %.0f, letzte Sprache nach %.1f s\n", (float)noiseLevel,
+                  voiceThreshold(), voiceSeen ? (lastVoiceMs - start) / 1000.0 : -1.0);
+  }
 
   playResponse();
   client.stop();
+}
+
+// Nach einer Unterhaltung wieder auf das Wake Word hoeren, sobald die Antwort verklungen ist.
+static void resumeListening() {
+  if (!USE_WAKEWORD || !wakeReady) return;
+  uint32_t until = (int32_t)(audioUntil - millis()) > 0 ? audioUntil : millis();
+  listenAfter = until + WAKE_LOCKOUT_MS;
+  if (!wakewordLoad()) Serial.println("Wake Word: Laden fehlgeschlagen");
 }
 
 // ---------- Setup / Loop ----------
@@ -491,11 +609,14 @@ void setup() {
   Serial.begin(115200);
   pinMode(BUTTON, INPUT_PULLUP);
   setupLed();
+  setupMotor();
 
   audioBuffer = xStreamBufferCreate(AUDIO_BUFFER_BYTES, 1);
   setupMic();
   setupAmp();
-  xTaskCreatePinnedToCore(micTask, "mic", 4096, nullptr, 5, nullptr, 1);
+  // Die Wake-Word-Inferenz laeuft im Mikrofon-Task und braucht mehr Stack
+  xTaskCreatePinnedToCore(micTask, "mic", USE_WAKEWORD ? 8192 : 4096, nullptr, 5, nullptr, 1);
+  if (USE_WAKEWORD) wakeReady = wakewordBegin();
 
 #if USE_TLS
   if (strlen(ROOT_CA) > 0) {
@@ -505,15 +626,28 @@ void setup() {
   }
 #endif
   connectWifi();
-  Serial.println("Bereit: Taster halten und sprechen");
+  if (wakeReady) {
+    Serial.printf("Bereit: \"%s\" sagen oder Taster halten und sprechen\n", wakewordName());
+  } else {
+    Serial.println("Bereit: Taster halten und sprechen");
+  }
 }
 
 void loop() {
   if (WiFi.status() != WL_CONNECTED) connectWifi();
+  if (wakeReady && !wakeListening && !wakeTriggered && (int32_t)(millis() - listenAfter) >= 0) {
+    wakeListening = true;
+  }
+  if (wakeTriggered) {
+    wakeTriggered = false;
+    conversation(true);
+    resumeListening();
+  }
   if (digitalRead(BUTTON) == LOW) {
     delay(30);  // Entprellen
     if (digitalRead(BUTTON) == LOW) {
-      conversation();
+      conversation(false);
+      resumeListening();
       while (digitalRead(BUTTON) == LOW) delay(10);
     }
   }

@@ -143,7 +143,7 @@ Im GitHub-Environment `production` müssen `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_
 
 ### Anschlussplan
 
-![Anschlussplan: ESP32-WROOM-32E mit INMP441, MAX98357A, Taster und Lautsprecher](docs/anschlussplan.svg)
+![Anschlussplan: ESP32-WROOM-32E mit INMP441, MAX98357A, Taster, Lautsprecher und Motor](docs/anschlussplan.svg)
 
 Benötigt: ESP32-DevKit (WROOM-32E), INMP441, MAX98357A, Lautsprecher (4–8 Ω, 2–3 W), Taster. Alle GND-Pins hängen zusammen, deshalb ist egal, welchen GND des ESP32 du nimmst. Die Pin-Reihenfolge auf deinen Platinen kann vom Plan abweichen: Löte immer nach der aufgedruckten Beschriftung.
 
@@ -159,6 +159,19 @@ Dieselbe Verkabelung als Tabelle:
 | SD | GPIO 34 | | SD, GAIN | offen |
 
 Taster zwischen GPIO 5 und GND, beide auf der rechten Stiftleiste. GPIO 5 ist ein Strapping-Pin, deshalb den Taster beim Einschalten nicht gedrückt halten. Die Onboard-LED (GPIO 2) leuchtet während der Aufnahme. Blinkt sie dreimal, kam keine Antwort; fünfmal heißt, es gab keine Verbindung.
+
+### Motor (optional)
+
+Ein kleiner 5-V-Motor, z. B. der Kopfmotor einer Kögler Laber-Giraffe (läuft sonst an 3× AAA, also 4,5 V). Er dreht, solange der Server arbeitet: vom Loslassen des Tasters bis zum ersten Ton, und nach einem Zwischensatz wie „Einen Moment bitte“ wieder, bis die Antwort kommt. Während gesprochen wird, steht er immer.
+
+| Bauteil | Anschluss |
+|---|---|
+| N-MOSFET, Logic-Level (z. B. IRLZ44N, IRLB8721) | Gate über 220 Ω an GPIO 4, Source an GND, Drain an Motor − |
+| 100 kΩ | zwischen Gate und Source (Motor aus, solange der ESP bootet) |
+| Motor | + an 5V, − an Drain |
+| Diode 1N5819 oder 1N4007 | parallel zum Motor, Ring (Kathode) an 5V |
+
+Die Elektronik der Giraffe abklemmen und nur die beiden Motordrähte nutzen. Ruckelt der ESP beim Anlaufen (Neustart, Knacken im Lautsprecher), hilft ein Elko (470 µF) zwischen 5V und GND nahe am Motor, gegen Funkstörungen 100 nF direkt an den Motorkontakten. Ein Relais geht auch, ist aber unnötig groß und braucht an 3,3 V meist selbst einen Transistor. Anderer Pin oder kein Motor: `MOTOR_PIN` in `firmware/src/main.cpp` (`-1` schaltet ihn ab).
 
 `firmware/include/secrets.example.h` nach `secrets.h` kopieren (WLAN, als `API_KEY` den ESP-Schlüssel aus dem Adminbereich, optional das Let's-Encrypt-Root-Zertifikat), dann:
 

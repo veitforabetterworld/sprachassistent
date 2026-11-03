@@ -922,7 +922,8 @@ async fn execute(
     let mut out = Vec::new();
     let mut warned = false;
     for call in calls {
-        show(say, Status::Tool(call.name.clone())).await;
+        let name = call.name.clone();
+        show(say, Status::Tool(name.clone())).await;
         let offer = offers.iter().find(|offer| offer.name == call.name);
         let schema = offer
             .map(|offer| offer.parameters.clone())
@@ -950,6 +951,8 @@ async fn execute(
                 _ = tokio::time::sleep(STILL_BUSY_AFTER), if channel == Channel::Voice && !warned => {
                     warned = true;
                     speak(say, still).await;
+                    // After the phrase the speaker shows the tool again (the ESP restarts its motor).
+                    show(say, Status::Tool(name.clone())).await;
                 }
             }
         };

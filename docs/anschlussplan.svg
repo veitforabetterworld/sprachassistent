@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 720" width="960" height="720" font-family="Arial, Helvetica, sans-serif" font-size="13">
-  <title>Anschlussplan: ESP32-WROOM-32E, INMP441, MAX98357A, Taster, Lautsprecher</title>
-  <rect width="960" height="720" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 780" width="1180" height="780" font-family="Arial, Helvetica, sans-serif" font-size="13">
+  <title>Anschlussplan: ESP32-WROOM-32E, INMP441, MAX98357A, Taster, Lautsprecher, Motor</title>
+  <rect width="1180" height="780" fill="#ffffff"/>
 
   <!-- ===== Leitungen (unter den Platinen gezeichnet) ===== -->
   <g fill="none" stroke-width="4" stroke-linejoin="round" stroke-linecap="round">
@@ -23,11 +23,48 @@
     <!-- Lautsprecher -->
     <polyline stroke="#d62828" stroke-width="3" points="152,370 110,370"/>
     <polyline stroke="#111111" stroke-width="3" points="152,410 110,410"/>
+    <!-- Motor: GND vom Mikrofon-GND, 5V vom Verstaerker-VIN, Gate an GPIO 4 -->
+    <polyline stroke="#111111" points="810,30 1150,30 1150,500 1040,500 1040,442"/>
+    <path stroke="#d62828" d="M310,568 L310,650 L1125,650 L1125,508 A8,8 0 0 0 1125,492 L1125,260 L1040,260 L1040,296"/>
+    <polyline stroke="#d62828" points="1090,260 1090,370 1040,370"/>
+    <polyline stroke="#7a4b20" points="748,416 1016,416"/>
+    <polyline stroke="#7a4b20" points="1000,416 1000,470 1040,470"/>
+    <polyline stroke="#111111" points="1040,344 1040,402 1024,402"/>
+    <polyline stroke="#111111" points="1024,430 1040,430 1040,442"/>
   </g>
   <!-- Verbindungspunkte -->
   <g fill="#111111">
     <circle cx="322" cy="80" r="5"/>
+    <circle cx="810" cy="30" r="5"/><circle cx="310" cy="568" r="5"/>
+    <circle cx="1090" cy="260" r="5"/><circle cx="1040" cy="370" r="5"/>
+    <circle cx="1000" cy="416" r="5"/><circle cx="1040" cy="470" r="5"/>
   </g>
+
+  <!-- ===== Motor-Treiber ===== -->
+  <rect x="930" y="205" width="240" height="320" rx="8" fill="none" stroke="#9a9a9a" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="1050" y="228" text-anchor="middle" font-weight="bold" font-size="15">Motor (Giraffe)</text>
+  <text x="1132" y="254" text-anchor="end" fill="#d62828" font-weight="bold">5V</text>
+  <!-- Motor -->
+  <circle cx="1040" cy="320" r="24" fill="#f2f2f2" stroke="#222222" stroke-width="2.5"/>
+  <text x="1040" y="326" text-anchor="middle" font-weight="bold" font-size="17">M</text>
+  <text x="1028" y="292" text-anchor="end" font-weight="bold">+</text>
+  <!-- Freilaufdiode, Ring (Kathode) zu 5V -->
+  <polygon points="1078,336 1102,336 1090,312" fill="#222222"/>
+  <line x1="1077" y1="310" x2="1103" y2="310" stroke="#222222" stroke-width="4"/>
+  <!-- Widerstaende -->
+  <rect x="940" y="408" width="40" height="16" fill="#ffffff" stroke="#222222" stroke-width="2"/>
+  <text x="960" y="400" text-anchor="middle" font-size="11">220 Ω</text>
+  <rect x="992" y="432" width="16" height="30" fill="#ffffff" stroke="#222222" stroke-width="2"/>
+  <text x="986" y="452" text-anchor="end" font-size="11">100 kΩ</text>
+  <!-- N-MOSFET: G links, D oben, S unten -->
+  <line x1="1016" y1="400" x2="1016" y2="432" stroke="#222222" stroke-width="3"/>
+  <line x1="1024" y1="396" x2="1024" y2="436" stroke="#222222" stroke-width="3"/>
+  <g font-size="11" fill="#555555">
+    <text x="1012" y="410" text-anchor="end">G</text>
+    <text x="1046" y="398">D</text>
+    <text x="1046" y="446">S</text>
+  </g>
+  <text x="1060" y="424" font-size="11" fill="#333333">MOSFET</text>
 
   <!-- ===== INMP441 ===== -->
   <text x="215" y="50" text-anchor="middle" font-weight="bold" font-size="15">INMP441 (Mikrofon)</text>
@@ -144,7 +181,7 @@
     <text x="736" y="338" fill="#ffffff" font-weight="bold">5</text>
     <text x="736" y="364">17</text>
     <text x="736" y="390">16</text>
-    <text x="736" y="416">4</text>
+    <text x="736" y="416" fill="#ffffff" font-weight="bold">4</text>
     <text x="736" y="442">0</text>
     <text x="736" y="468">2</text>
     <text x="736" y="494">15</text>
@@ -164,8 +201,9 @@
 
   <!-- ===== Hinweise ===== -->
   <g fill="#333333" font-size="13">
-    <text x="24" y="660">• L/R und GND des Mikrofons beide an GND (linker Kanal). Alle GND-Pins sind miteinander verbunden.</text>
-    <text x="24" y="680">• VIN des Verstärkers an 5V (bei 30-Pin-Boards heißt der Pin VIN). Mikrofon nur an 3V3, nicht an 5V!</text>
-    <text x="24" y="700">• Die Pin-Reihenfolge auf deinen Platinen kann abweichen: immer nach der aufgedruckten Beschriftung löten.</text>
+    <text x="24" y="700">• L/R und GND des Mikrofons beide an GND (linker Kanal). Alle GND-Pins sind miteinander verbunden.</text>
+    <text x="24" y="720">• VIN des Verstärkers an 5V (bei 30-Pin-Boards heißt der Pin VIN). Mikrofon nur an 3V3, nicht an 5V!</text>
+    <text x="24" y="740">• Motor: Logic-Level-MOSFET (z. B. IRLZ44N), Diode 1N5819 oder 1N4007 mit dem Ring an 5V. Den Motor direkt anlöten, die Elektronik der Giraffe abklemmen.</text>
+    <text x="24" y="760">• Die Pin-Reihenfolge auf deinen Platinen kann abweichen: immer nach der aufgedruckten Beschriftung löten.</text>
   </g>
 </svg>

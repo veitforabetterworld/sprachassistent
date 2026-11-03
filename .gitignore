@@ -10,6 +10,14 @@
 # Firmware
 firmware/.pio/
 firmware/include/secrets.h
+# Von firmware/tools/fetch_wakeword_libs.py geholt
+firmware/lib/esp-tflite-micro/
+firmware/lib/esp-nn/
+
+# Wake-Word-Training: nur Skripte und fertige Modelle ins Repo
+training/data/
+training/.venv/
+__pycache__/
 
 # Node
 node_modules/
