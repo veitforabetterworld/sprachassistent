@@ -407,6 +407,7 @@ async fn drive(
     let mut settle = false;
     let mut research_steps = 0usize;
     let mut researched = std::collections::HashSet::new();
+    let mut research_results: Vec<(usize, String, String)> = Vec::new();
     loop {
         if started.elapsed() > budget || iterations >= limit {
             return fail(&say, &mut guard, TOO_LONG).await;
@@ -708,6 +709,14 @@ Erst nach dem neuen Lese-Ergebnis einzeln aufrufen, falls es noch nötig ist."
             let _ = store.add_message(device.id, "user", user_text).await;
             user_saved = true;
         }
+        // A new research step carries the model's notes on what it read so far. The pages
+        // themselves then leave the prompt; only the newest result is sent in full.
+        if research_now > 0 {
+            let notes = research_notes(&calls);
+            for (at, label, start) in research_results.drain(..) {
+                messages[at].content = compact_research(&label, &start, &notes);
+            }
+        }
         messages.push(ChatMessage {
             role: "assistant".into(),
             content: turn.content.clone(),
@@ -729,6 +738,11 @@ Erst nach dem neuen Lese-Ergebnis einzeln aufrufen, falls es noch nötig ist."
                 .unwrap_or(&call.name);
             let framed = frame_tool_result(label, body);
             let limit = if tool_kind(&call.name) == ToolKind::Research {
+                research_results.push((
+                    messages.len(),
+                    label.to_string(),
+                    truncate(body, OLD_RESULT_CHARS),
+                ));
                 RESEARCH_RESULT_CHARS
             } else {
                 TOOL_RESULT_CHARS
@@ -978,13 +992,45 @@ fn recover_text_tool_call(content: &str, defs: &[ToolDef]) -> Option<ToolCall> {
 }
 
 const ALREADY_READ: &str =
-    "Schon gelesen, das Ergebnis steht weiter oben. Nimm einen anderen Link oder antworte.";
+    "Schon gelesen, was davon zählt, steht oben oder in deinen Notizen. Nimm einen anderen Link oder antworte.";
+
+/// What is left of an older research result when the model has moved on.
+const OLD_RESULT_CHARS: usize = 400;
 
 /// Arguments of a research call with the order of keys and spacing evened out.
+/// The notes change with every step and do not make a different request.
 fn research_key(arguments: &str) -> String {
     serde_json::from_str::<Value>(arguments)
-        .map(|args| args.to_string())
+        .map(|mut args| {
+            if let Some(map) = args.as_object_mut() {
+                map.remove("notes");
+            }
+            args.to_string()
+        })
         .unwrap_or_else(|_| arguments.trim().to_string())
+}
+
+/// The notes the model wrote into this turn's research calls.
+fn research_notes(calls: &[ToolCall]) -> String {
+    calls
+        .iter()
+        .filter(|call| tool_kind(&call.name) == ToolKind::Research)
+        .filter_map(|call| serde_json::from_str::<Value>(&call.arguments).ok())
+        .filter_map(|args| args.get("notes")?.as_str().map(|s| s.trim().to_string()))
+        .filter(|notes| !notes.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// An older research result reduced to the model's notes, or to its start when there are none.
+fn compact_research(label: &str, start: &str, notes: &str) -> String {
+    if notes.is_empty() {
+        return frame_tool_result(label, &format!("Älteres Ergebnis, gekürzt:\n{start}"));
+    }
+    frame_tool_result(
+        label,
+        "Älteres Ergebnis, ersetzt durch deine Notizen im nächsten Aufruf.",
+    )
 }
 
 fn search_follow_up(messages: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -1139,5 +1185,8 @@ mod tests {
         let other = research_key(r#"{"action":"follow","url":"https://a.de/y"}"#);
         assert_eq!(first, again);
         assert_ne!(first, other);
+        let with_notes =
+            research_key(r#"{"action":"follow","url":"https://a.de/x","notes":"neu"}"#);
+        assert_eq!(first, with_notes);
     }
 }

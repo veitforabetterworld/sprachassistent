@@ -632,6 +632,45 @@ async fn asking_again_for_the_same_research_ends_in_an_answer() {
 }
 
 #[tokio::test]
+async fn older_pages_leave_the_prompt_once_the_model_wrote_notes() {
+    let Some((s, tools, device, _)) = named_tool_setup("web_research", Effect::Auto).await else {
+        return;
+    };
+    s.llm.push(research_turn());
+    s.llm.push(ModelTurn {
+        tool_calls: vec![ToolCall {
+            id: "r2".into(),
+            name: "web_research".into(),
+            arguments: r#"{"action":"search","query":"Wahl","notes":"Wahl am Sonntag"}"#.into(),
+            thought_signature: None,
+        }],
+        ..ModelTurn::default()
+    });
+    s.llm.push(tool_turn(false, "Die Wahl ist am Sonntag."));
+    let reply = chat(&s, device, "Wann ist die Wahl?").await;
+    assert_eq!(reply["reply"], "Die Wahl ist am Sonntag.");
+    assert_eq!(*tools.calls.lock().unwrap(), 2);
+    let seen = s.llm.seen.lock().unwrap();
+    let result = |messages: &[ChatMessage], id: &str| {
+        messages
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some(id))
+            .map(|m| m.content.clone())
+            .unwrap()
+    };
+    // The second step still sees the first page in full.
+    assert!(result(&seen[1].1, "r1").contains("pong"));
+    let third = &seen[2].1;
+    assert!(!result(third, "r1").contains("pong"));
+    assert!(result(third, "r1").contains("Notizen"));
+    assert!(result(third, "r2").contains("pong"));
+    assert!(third.iter().any(|m| m
+        .tool_calls
+        .iter()
+        .any(|c| c.arguments.contains("Wahl am Sonntag"))));
+}
+
+#[tokio::test]
 async fn tool_call_speaks_the_busy_line_before_the_answer() {
     let Some((s, tools, device, key)) = tool_setup(Effect::Auto).await else {
         return;
