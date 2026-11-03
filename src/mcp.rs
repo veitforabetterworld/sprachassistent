@@ -198,9 +198,18 @@ fn remote_failure(text: &str) -> anyhow::Error {
         .any(|hint| lower.contains(hint))
     {
         "mcp.unauthorized"
-    } else if ["connect", "dns", "refused", "resolve"]
-        .iter()
-        .any(|hint| lower.contains(hint))
+    } else if lower.contains("timed out") {
+        "mcp.timeout"
+    } else if [
+        "connect",
+        "dns",
+        "refused",
+        "resolve",
+        // reqwest says this for every request that never got out: unknown name, no route, TLS.
+        "error sending request",
+    ]
+    .iter()
+    .any(|hint| lower.contains(hint))
     {
         "mcp.unreachable"
     } else {
@@ -339,4 +348,26 @@ pub fn http_client() -> Result<reqwest::Client> {
 #[allow(dead_code)]
 pub fn arc_client() -> Result<Arc<reqwest::Client>> {
     Ok(Arc::new(http_client()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::failure::code_of;
+
+    #[test]
+    fn rmcp_errors_get_a_code() {
+        let code = |text: &str| code_of(&remote_failure(text));
+        // As rmcp reported a Home Assistant whose name did not resolve.
+        assert_eq!(
+            code("Send message error Transport [rmcp::transport::worker::WorkerTransport<...>] error: Client error: error sending request for url (http://ha.example:8123/api/mcp), when send initialize request"),
+            Some("mcp.unreachable")
+        );
+        assert_eq!(
+            code("HTTP status client error (401 Unauthorized)"),
+            Some("mcp.unauthorized")
+        );
+        assert_eq!(code("operation timed out"), Some("mcp.timeout"));
+        assert_eq!(code("tool returned garbage"), Some("mcp.failed"));
+    }
 }
