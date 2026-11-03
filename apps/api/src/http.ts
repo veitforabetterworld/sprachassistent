@@ -5,13 +5,33 @@ import { env } from "./env.js";
 
 /** Shared HTTP helpers for the admin and MCP routes. */
 
+/**
+ * Answered as `{ code, detail?, fields? }`. The code is a key the web words (apps/web/src/errors.ts);
+ * detail is technical, fields name the inputs that failed validation.
+ */
 export class HttpError extends Error {
   constructor(
     readonly status: number,
-    message: string,
+    readonly code: string,
+    readonly detail = "",
+    readonly fields: string[] = [],
   ) {
-    super(message);
+    super(detail || code);
   }
+}
+
+/** The error handler at the end of a router. Anything without a code is only "internal" outside the log. */
+export function sendError(error: unknown, _req: Request, res: Response, _next: NextFunction): void {
+  if (error instanceof HttpError) {
+    res.status(error.status).json({
+      code: error.code,
+      ...(error.detail ? { detail: error.detail } : {}),
+      ...(error.fields.length ? { fields: error.fields } : {}),
+    });
+    return;
+  }
+  console.error(error);
+  res.status(500).json({ code: "internal" });
 }
 
 type Handler = (req: Request, res: Response) => Promise<unknown>;
@@ -23,7 +43,13 @@ export const handle = (fn: Handler) => (req: Request, res: Response, next: NextF
 export function parse<T>(schema: z.ZodType<T>, body: unknown): T {
   const result = schema.safeParse(body);
   if (!result.success) {
-    throw new HttpError(400, result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
+    const issues = result.error.issues;
+    throw new HttpError(
+      400,
+      "validation",
+      issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      [...new Set(issues.map((i) => String(i.path[0] ?? "")).filter(Boolean))],
+    );
   }
   return result.data;
 }
@@ -38,7 +64,7 @@ export async function toVoice(res: Response, path: string, init?: { method?: str
       body: init?.body === undefined ? undefined : JSON.stringify(init.body),
     });
   } catch {
-    throw new HttpError(502, "Sprachserver nicht erreichbar");
+    throw new HttpError(502, "voice.unreachable");
   }
   res.status(upstream.status);
   for (const header of ["content-type", "x-sample-rate", "x-transcript"]) {
@@ -59,7 +85,7 @@ export async function toVoiceBuffer(res: Response, path: string, body: Buffer, c
       body: new Uint8Array(body),
     });
   } catch {
-    throw new HttpError(502, "Sprachserver nicht erreichbar");
+    throw new HttpError(502, "voice.unreachable");
   }
   const text = await upstream.text();
   res.status(upstream.status);

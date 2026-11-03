@@ -14,7 +14,8 @@ import {
 } from "@veit/react-controls";
 import { VeitOverlayEditDialog, useDialogFormBaseline, useManagedOverlayDialogBinding } from "@veit/react-dialog";
 import { VeitSortableActivatorRow, VeitSortableVerticalList } from "@veit/react-dnd";
-import { adminApi, errorText, type Provider, type ProviderInput } from "../../api";
+import { adminApi, codeText, errorDetail, errorText, type Provider, type ProviderInput } from "../../api";
+import { ErrorDetails } from "./ErrorDetails";
 import type { MessageKey } from "../../i18n/de";
 import { useI18n } from "../../i18n/I18nProvider";
 import { linkClass } from "../Layout";
@@ -101,7 +102,7 @@ function ProviderEditDialog({
   const [draft, setDraft] = useState<Draft>(initial);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string; detail?: string } | null>(null);
   const [testing, setTesting] = useState(false);
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }));
   useEffect(() => {
@@ -129,15 +130,15 @@ function ProviderEditDialog({
       const r = tools ? await adminApi.testProviderTools(probe) : await adminApi.testProvider(probe);
       const called = "called" in r && r.called;
       const text = !r.ok
-        ? (r.error ?? t("error"))
+        ? codeText(r.error?.code ?? "internal")
         : tools
           ? called
             ? tf("testToolsReply", { ms: r.ms })
             : tf("testToolsText", { reply: r.reply ?? "" })
           : tf("testReply", { reply: r.reply ?? "", ms: r.ms });
-      setTestResult({ ok: r.ok, text });
+      setTestResult({ ok: r.ok, text, detail: r.ok ? undefined : r.error?.detail });
     } catch (e) {
-      setTestResult({ ok: false, text: errorText(e) });
+      setTestResult({ ok: false, text: errorText(e), detail: errorDetail(e) });
     } finally {
       setTesting(false);
     }
@@ -268,6 +269,7 @@ function ProviderEditDialog({
                 {testResult.text}
               </VeitStatusBadge>
             )}
+            <ErrorDetails detail={testResult?.detail} />
           </div>
         </VeitField>
         {error && (

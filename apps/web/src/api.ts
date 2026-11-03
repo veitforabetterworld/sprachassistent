@@ -1,9 +1,9 @@
-import { createAuthProvider, createRestAuthClient, useAuth, veitFetchJson, VeitApiError, type VeitWireUser } from "@veit/react-auth";
+import { createAuthProvider, createRestAuthClient, useAuth, veitFetchJson, type VeitWireUser } from "@veit/react-auth";
 import { createRestAccountClient } from "@veit/react-account";
 import { createRestApiKeysClient } from "@veit/react-api-keys";
 import { formatLocalizedDateTime } from "@veit/intl";
 import { getActiveLocale } from "./i18n/locale";
-import { trFormat } from "./i18n/translate";
+import { fetchAdminJson, readJson, type Failure } from "./errors";
 
 /** Signed-in user as apps/api sends it (@veit/auth-server) plus the admin flag. */
 export type AccountUser = VeitWireUser & { is_admin: boolean; verification_required: boolean };
@@ -17,12 +17,9 @@ export function useAccount() {
   return useAuth<AccountUser>();
 }
 
-export function errorText(error: unknown): string {
-  return error instanceof VeitApiError ? error.code : String(error);
-}
+export { errorDetail, errorText, codeText, type Failure } from "./errors";
 
-const admin = <T>(path: string, method = "GET", body?: unknown) =>
-  veitFetchJson<T>(`/v1/admin${path}`, { method, body });
+const admin = <T>(path: string, method = "GET", body?: unknown) => fetchAdminJson<T>(`/v1/admin${path}`, { method, body });
 
 export type Device = {
   id: string;
@@ -76,7 +73,9 @@ export type McpServer = {
   secret_set: boolean;
   oauth_set: boolean;
   status: string;
+  /** A code, see errors.ts; the detail is what the server said. */
   last_error: string;
+  last_error_detail: string;
   last_ok_at: string | null;
 };
 export type McpInput = {
@@ -131,9 +130,9 @@ export const adminApi = {
   providerKey: async (id: string) => (await admin<{ key: string }>(`/providers/${id}/key`)).key,
   /** Tests the dialog's values; an empty key uses the one stored under `id`. */
   testProvider: (draft: ProviderDraft) =>
-    admin<{ ok: boolean; reply?: string; error?: string; ms: number }>("/providers/test", "POST", draft),
+    admin<{ ok: boolean; reply?: string; error?: Failure; ms: number }>("/providers/test", "POST", draft),
   testProviderTools: (draft: ProviderDraft) =>
-    admin<{ ok: boolean; called?: boolean; reply?: string; error?: string; ms: number }>("/providers/tool-test", "POST", draft),
+    admin<{ ok: boolean; called?: boolean; reply?: string; error?: Failure; ms: number }>("/providers/tool-test", "POST", draft),
   providerChoices: async () => (await admin<{ providers: { id: string; name: string }[] }>("/provider-choices")).providers,
 
   devices: async () => (await admin<{ devices: Device[] }>("/devices")).devices,
@@ -169,7 +168,7 @@ export const adminApi = {
   createMcp: (input: McpInput) => admin<McpServer>("/mcp", "POST", input),
   updateMcp: (id: string, input: McpInput) => admin<McpServer>(`/mcp/${id}`, "PUT", input),
   deleteMcp: (id: string) => admin<null>(`/mcp/${id}`, "DELETE"),
-  discoverMcp: (id: string) => admin<{ ok: boolean; tools?: number; error?: string }>(`/mcp/${id}/discover`, "POST", {}),
+  discoverMcp: (id: string) => admin<{ ok: boolean; tools?: number; error?: Failure }>(`/mcp/${id}/discover`, "POST", {}),
   updateMcpTool: (serverId: string, name: string, body: { enabled: boolean; effect: ToolEffect }) =>
     admin<McpTool>(`/mcp/${encodeURIComponent(serverId)}/tools/${encodeURIComponent(name)}`, "PUT", body),
   nativeTools: () => admin<{ tools: NativeTool[] }>("/tools/native"),
@@ -190,9 +189,8 @@ export async function transcribe(wav: Blob): Promise<string> {
     headers: { "content-type": "audio/wav" }, // i18n-ignore: mime type
     body: wav,
   });
-  const data = (await res.json().catch(() => ({}))) as { text?: string; error?: string };
-  if (!res.ok) throw new Error(data.error || trFormat("speechError", { status: res.status }));
-  return data.text ?? "";
+  const data = await readJson<{ text?: string }>(res);
+  return data?.text ?? "";
 }
 
 /** The device's voice as a playable blob URL (POST, so not a plain <audio src>). */
@@ -203,7 +201,7 @@ export async function speakUrl(deviceId: string, text: string): Promise<string> 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
   });
-  if (!res.ok) throw new Error(trFormat("speechError", { status: res.status }));
+  if (!res.ok) await readJson(res);
   // The voice server streams a WAV of unknown length; browsers play it once the sizes are filled in.
   const wav = new Uint8Array(await res.arrayBuffer());
   const view = new DataView(wav.buffer);

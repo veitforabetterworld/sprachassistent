@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUp, ChevronRight, Loader2, Mic, Square, Volume2 } from "lucide-react";
 import { VeitButton, VeitInput, VeitScrollArea } from "@veit/react-controls";
-import { adminApi, speakUrl, transcribe, type Message, type ToolCallMeta } from "../../api";
+import { adminApi, errorText, speakUrl, transcribe, type Message, type ToolCallMeta } from "../../api";
+import { micErrorText } from "../../errors";
 import { useI18n } from "../../i18n/I18nProvider";
 
 type Action = { id: string; name: string; detail: string; error: boolean };
@@ -212,7 +213,7 @@ export function ChatPanel({ deviceId, historyVersion = 0 }: { deviceId: string; 
       setMessages(memory.messages);
     } catch (error) {
       setMessages((current) => current.filter((message) => message.id !== "pending"));
-      setNotice(error instanceof Error ? error.message : t("error"));
+      setNotice(errorText(error));
     } finally {
       setBusy(false);
     }
@@ -245,7 +246,7 @@ export function ChatPanel({ deviceId, historyVersion = 0 }: { deviceId: string; 
     } catch (error) {
       if (speech.current !== entry) return;
       stopAudio();
-      setNotice(error instanceof Error ? error.message : t("error"));
+      setNotice(errorText(error));
     }
   };
 
@@ -273,13 +274,13 @@ export function ChatPanel({ deviceId, historyVersion = 0 }: { deviceId: string; 
             if (!value) setNotice(t("chatNothingHeard"));
             else setText((current) => (current.trim() ? `${current.trim()} ${value}` : value));
           })
-          .catch((error: unknown) => setNotice(error instanceof Error ? error.message : t("error")));
+          .catch((error: unknown) => setNotice(errorText(error)));
       };
       recorder.current = media;
       media.start();
       setRecording(true);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : t("error"));
+      setNotice(micErrorText(error));
     }
   };
 

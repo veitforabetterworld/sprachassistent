@@ -34,7 +34,7 @@ const LEGACY_NATIVE = ["web_search", "fetch_url"] as const;
 
 function userId(req: Parameters<typeof getAuthUser>[0]): string | number {
   const user = getAuthUser(req);
-  if (!user) throw new HttpError(401, "Bitte anmelden");
+  if (!user) throw new HttpError(401, "auth.unauthenticated");
   return user.id;
 }
 
@@ -53,7 +53,7 @@ export function registerMcp(router: Router): void {
       const servers = await pool.query(
         `SELECT id, name, preset, transport, url, command, enabled, auth_type,
                 secret_enc <> '' AS secret_set, oauth_enc <> '' AS oauth_set,
-                status, last_error, last_ok_at
+                status, last_error, last_error_detail, last_ok_at
          FROM mcp_servers WHERE user_id = $1 ORDER BY name`,
         [id],
       );
@@ -79,7 +79,7 @@ export function registerMcp(router: Router): void {
         `INSERT INTO mcp_servers (user_id, name, preset, transport, url, command, enabled, auth_type, secret_enc)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id, name, preset, transport, url, command, enabled, auth_type,
-                   secret_enc <> '' AS secret_set, oauth_enc <> '' AS oauth_set, status, last_error, last_ok_at`,
+                   secret_enc <> '' AS secret_set, oauth_enc <> '' AS oauth_set, status, last_error, last_error_detail, last_ok_at`,
         [id, body.name, body.preset, body.transport, url, body.command, body.enabled, auth, body.secret ? seal(body.secret) : ""],
       );
       res.status(201).json(row.rows[0]);
@@ -97,7 +97,7 @@ export function registerMcp(router: Router): void {
                 auth_type = $9, secret_enc = CASE WHEN $10 = '' THEN secret_enc ELSE $10 END
          WHERE id = $1 AND user_id = $2
          RETURNING id, name, preset, transport, url, command, enabled, auth_type,
-                   secret_enc <> '' AS secret_set, oauth_enc <> '' AS oauth_set, status, last_error, last_ok_at`,
+                   secret_enc <> '' AS secret_set, oauth_enc <> '' AS oauth_set, status, last_error, last_error_detail, last_ok_at`,
         [
           id,
           owner,
@@ -111,7 +111,7 @@ export function registerMcp(router: Router): void {
           body.secret ? seal(body.secret) : "",
         ],
       );
-      if (!row.rows[0]) throw new HttpError(404, "MCP-Server nicht gefunden");
+      if (!row.rows[0]) throw new HttpError(404, "mcp.not_found");
       res.json(row.rows[0]);
     }),
   );
@@ -123,7 +123,7 @@ export function registerMcp(router: Router): void {
         parse(uuid, req.params.id),
         userId(req),
       ]);
-      if (result.rowCount === 0) throw new HttpError(404, "MCP-Server nicht gefunden");
+      if (result.rowCount === 0) throw new HttpError(404, "mcp.not_found");
       res.status(204).end();
     }),
   );
@@ -133,7 +133,7 @@ export function registerMcp(router: Router): void {
     handle(async (req, res) => {
       const id = parse(uuid, req.params.id);
       const owned = await pool.query(`SELECT 1 FROM mcp_servers WHERE id = $1 AND user_id = $2`, [id, userId(req)]);
-      if (!owned.rows[0]) throw new HttpError(404, "MCP-Server nicht gefunden");
+      if (!owned.rows[0]) throw new HttpError(404, "mcp.not_found");
       await toVoice(res, `/internal/mcp/${id}/discover`, { method: "POST", body: {} });
     }),
   );
@@ -141,7 +141,14 @@ export function registerMcp(router: Router): void {
   router.get(
     "/mcp/:id/oauth/start",
     handle(async (req, res) => {
-      await startOAuth(req, res, userId(req), parse(uuid, req.params.id));
+      // The browser navigates here, so a failure goes back to the page instead of answering JSON.
+      try {
+        await startOAuth(req, res, userId(req), parse(uuid, req.params.id));
+      } catch (error) {
+        const code = error instanceof HttpError ? error.code : "internal";
+        if (!(error instanceof HttpError)) console.error(error);
+        res.redirect(`/werkzeuge?oauth=error&code=${encodeURIComponent(code)}`);
+      }
     }),
   );
 
@@ -156,7 +163,7 @@ export function registerMcp(router: Router): void {
          RETURNING t.server_id, t.name, t.description, t.enabled, t.effect, t.present`,
         [parse(uuid, req.params.id), userId(req), req.params.name, body.enabled, body.effect],
       );
-      if (!row.rows[0]) throw new HttpError(404, "Werkzeug nicht gefunden");
+      if (!row.rows[0]) throw new HttpError(404, "tool.not_found");
       res.json(row.rows[0]);
     }),
   );

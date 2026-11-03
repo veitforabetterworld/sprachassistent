@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+use crate::failure::{self, failure, llm_status_code};
 use crate::secrets::redact;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -207,7 +208,12 @@ impl Llm {
         if !p.api_key.is_empty() {
             req = req.bearer_auth(&p.api_key);
         }
-        let no_answer = || anyhow!("keine Antwort nach {} s", wait.as_secs());
+        let no_answer = || {
+            failure(
+                "llm.timeout",
+                format!("keine Antwort nach {} s", wait.as_secs()),
+            )
+        };
         // reqwest says "error sending request" for both; the admin test should name the reason.
         let resp = tokio::time::timeout(wait, req.send())
             .await
@@ -216,18 +222,24 @@ impl Llm {
                 if e.is_timeout() {
                     no_answer()
                 } else if e.is_connect() {
-                    anyhow!("keine Verbindung zu {}", p.base_url)
+                    failure(
+                        "llm.unreachable",
+                        format!("keine Verbindung zu {}", p.base_url),
+                    )
                 } else {
-                    e.into()
+                    failure("llm.unreachable", e.to_string())
                 }
             })?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            bail!(
-                "HTTP {status}: {}",
-                redact(&text.chars().take(1200).collect::<String>())
-            );
+            return Err(failure(
+                llm_status_code(status.as_u16()),
+                format!(
+                    "HTTP {status}: {}",
+                    redact(&text.chars().take(1200).collect::<String>())
+                ),
+            ));
         }
         Ok(resp)
     }
@@ -610,30 +622,33 @@ fn common_prefix(left: &str, right: &str) -> usize {
 
 pub const ALL_AT_LIMIT: &str = "alle am Limit";
 
+/// One failed provider: its name with the detail, and the code.
+type Attempt = (String, &'static str);
+
+fn attempt(p: &Provider, e: &anyhow::Error) -> Attempt {
+    (
+        format!("{}: {}", p.name, redact(&e.to_string())),
+        failure::code_of(e).unwrap_or("llm.failed"),
+    )
+}
+
 /// The error after the last provider failed. Only when every one was at its limit or overloaded
 /// does it say so; one real error (bad key, bad request) is not hidden behind "limit".
-fn no_provider(errors: Vec<String>) -> anyhow::Error {
-    if errors.is_empty() {
-        anyhow!("kein KI-Modell eingerichtet (Adminbereich: KI-Modelle, API-Key eintragen)")
-    } else if errors.iter().all(|e| transient_failure(e)) {
-        anyhow!(
+fn no_provider(attempts: Vec<Attempt>) -> anyhow::Error {
+    let codes: Vec<&'static str> = attempts.iter().map(|(_, code)| *code).collect();
+    let errors: Vec<String> = attempts.into_iter().map(|(text, _)| text).collect();
+    let code = failure::llm_summary(&codes);
+    let detail = if errors.is_empty() {
+        "kein KI-Modell eingerichtet (Adminbereich: KI-Modelle, API-Key eintragen)".to_string()
+    } else if codes.iter().all(|c| failure::is_transient(c)) {
+        format!(
             "kein KI-Modell erreichbar, {ALL_AT_LIMIT} ({})",
             errors.join("; ")
         )
     } else {
-        anyhow!("kein KI-Modell erreichbar ({})", errors.join("; "))
-    }
-}
-
-/// Limit, overload or no answer in time: worth trying again a little later.
-pub fn transient_failure(detail: &str) -> bool {
-    let lower = detail.to_ascii_lowercase();
-    ["429", "413", "502", "503", "504"]
-        .iter()
-        .any(|code| detail.contains(code))
-        || lower.contains("timed out")
-        || lower.contains("timeout")
-        || lower.contains("keine antwort nach")
+        format!("kein KI-Modell erreichbar ({})", errors.join("; "))
+    };
+    failure(code, detail)
 }
 
 fn parse_turn(v: &Value, provider: &str) -> Result<ModelTurn> {
@@ -647,7 +662,7 @@ fn parse_turn(v: &Value, provider: &str) -> Result<ModelTurn> {
         .map(|calls| calls.iter().filter_map(parse_tool_call).collect())
         .unwrap_or_default();
     if content.is_empty() && tool_calls.is_empty() {
-        bail!("Antwort ohne Inhalt");
+        return Err(failure("llm.empty_reply", "Antwort ohne Inhalt"));
     }
     Ok(ModelTurn {
         content,
@@ -700,7 +715,7 @@ impl ChatModel for Llm {
                 }
                 Err(e) => {
                     tracing::warn!("{} fehlgeschlagen: {}", p.name, redact(&format!("{e:#}")));
-                    errors.push(format!("{}: {}", p.name, redact(&e.to_string())));
+                    errors.push(attempt(p, &e));
                 }
             }
         }
@@ -721,7 +736,7 @@ impl ChatModel for Llm {
                 Ok(turn) => return Ok(turn),
                 Err(e) => {
                     tracing::warn!("{} fehlgeschlagen: {}", p.name, redact(&format!("{e:#}")));
-                    errors.push(format!("{}: {}", p.name, redact(&e.to_string())));
+                    errors.push(attempt(p, &e));
                 }
             }
         }
@@ -759,7 +774,7 @@ impl ChatModel for Llm {
                         return Ok(salvaged_turn(p, call));
                     }
                     tracing::warn!("{} fehlgeschlagen: {}", p.name, redact(&format!("{e:#}")));
-                    errors.push(format!("{}: {}", p.name, redact(&text)));
+                    errors.push(attempt(p, &e));
                 }
             }
         }
@@ -863,7 +878,7 @@ impl StreamedTurn {
             })
             .collect();
         if self.content.is_empty() && tool_calls.is_empty() {
-            bail!("Antwort ohne Inhalt");
+            return Err(failure("llm.empty_reply", "Antwort ohne Inhalt"));
         }
         Ok(ModelTurn {
             content: self.content,
@@ -901,7 +916,10 @@ async fn read_streamed_turn(
                 continue;
             };
             if v.get("error").is_some() {
-                bail!("{}", redact(&data.chars().take(600).collect::<String>()));
+                return Err(failure(
+                    "llm.failed",
+                    redact(&data.chars().take(600).collect::<String>()),
+                ));
             }
             if let Some(text) = turn.take(&v) {
                 // Nobody listening any more only means the speaker is gone; the turn still counts.
@@ -944,7 +962,7 @@ impl Llm {
                     );
                     return Ok(salvaged_turn(provider, call));
                 }
-                bail!(text)
+                Err(e)
             }
         }
     }
@@ -1204,14 +1222,18 @@ mod tests {
 
     #[test]
     fn limit_only_when_every_model_is_at_its_limit() {
-        let both = no_provider(vec!["Groq: HTTP 429".into(), "Gemini: HTTP 503".into()]);
+        let both = no_provider(vec![
+            ("Groq: HTTP 429".into(), "llm.at_limit"),
+            ("Gemini: HTTP 503".into(), "llm.unavailable"),
+        ]);
         assert!(both.to_string().contains(ALL_AT_LIMIT));
+        assert_eq!(failure::code_of(&both), Some("llm.at_limit"));
         let mixed = no_provider(vec![
-            "Gemini: HTTP 400 Bad Request".into(),
-            "Groq: HTTP 429".into(),
+            ("Gemini: HTTP 400 Bad Request".into(), "llm.bad_request"),
+            ("Groq: HTTP 429".into(), "llm.at_limit"),
         ]);
         assert!(!mixed.to_string().contains(ALL_AT_LIMIT));
-        assert!(transient_failure("keine Antwort nach 10 s"));
+        assert_eq!(failure::code_of(&mixed), Some("llm.bad_request"));
     }
 
     #[test]

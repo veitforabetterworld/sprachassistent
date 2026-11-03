@@ -31,12 +31,12 @@ export async function startOAuth(req: Request, res: Response, userId: UserId, se
     [serverId, userId],
   );
   const server = row.rows[0];
-  if (!server) throw new HttpError(404, "MCP-Server nicht gefunden");
+  if (!server) throw new HttpError(404, "mcp.not_found");
   const scope = SCOPES[server.preset];
-  if (!scope) throw new HttpError(400, "Dieser Server nutzt kein Google-OAuth");
+  if (!scope) throw new HttpError(400, "mcp.not_oauth");
   const clientId = (await getSetting("google_oauth_client_id")) ?? "";
   if (!clientId || !(await getSetting("google_oauth_client_secret"))) {
-    throw new HttpError(400, "Google-OAuth ist nicht eingerichtet");
+    throw new HttpError(400, "mcp.oauth_not_configured");
   }
   const state = randomBytes(24).toString("base64url");
   await pool.query(`DELETE FROM oauth_states WHERE expires_at < NOW()`);
@@ -101,7 +101,7 @@ export async function finishOAuth(req: Request, res: Response): Promise<void> {
     access_token: json.access_token,
     expires_at: Math.floor(Date.now() / 1000) + (json.expires_in ?? 3600),
   });
-  await pool.query(`UPDATE mcp_servers SET oauth_enc = $2, auth_type = 'oauth', status = 'unknown', last_error = '' WHERE id = $1 AND user_id = $3`, [
+  await pool.query(`UPDATE mcp_servers SET oauth_enc = $2, auth_type = 'oauth', status = 'unknown', last_error = '', last_error_detail = '' WHERE id = $1 AND user_id = $3`, [
     row.server_id,
     seal(blob),
     user.id,

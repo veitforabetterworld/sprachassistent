@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -12,6 +12,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
+use crate::failure::failure;
 use crate::llm::Provider;
 use crate::mcp::DiscoveredTool;
 use crate::secrets::Secrets;
@@ -166,7 +167,7 @@ impl Store {
         requested: Option<Uuid>,
     ) -> Result<Device> {
         if !raw_key.starts_with(KEY_PREFIX) {
-            bail!("unbekannter Schluessel");
+            return Err(failure("key.unknown", "unbekannter Schlüssel"));
         }
         let pepper: Option<(String,)> =
             sqlx::query_as("SELECT value FROM app_settings WHERE key = 'api_key_pepper'")
@@ -183,15 +184,18 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
         let Some((user_id, all, resources)) = key else {
-            bail!("unbekannter Schluessel");
+            return Err(failure("key.unknown", "unbekannter Schlüssel"));
         };
         let id = self
             .owned_device(user_id, all, &resources, requested)
             .await?;
         match self.device(id).await? {
             Some(device) if device.user_id == Some(user_id) => Ok(device),
-            Some(_) => bail!("Schluessel gilt nicht fuer dieses Geraet"),
-            None => bail!("Geraet gibt es nicht"),
+            Some(_) => Err(failure(
+                "key.wrong_device",
+                "Schlüssel gilt nicht für dieses Gerät",
+            )),
+            None => Err(failure("device.not_found", "Gerät gibt es nicht")),
         }
     }
 
@@ -214,10 +218,13 @@ impl Store {
         .await?;
         match requested {
             Some(id) if ids.iter().any(|(found,)| *found == id) => Ok(id),
-            Some(_) => bail!("Schluessel gilt nicht fuer dieses Geraet"),
+            Some(_) => Err(failure(
+                "key.wrong_device",
+                "Schlüssel gilt nicht für dieses Gerät",
+            )),
             None => match ids.as_slice() {
                 [(only,)] => Ok(*only),
-                _ => bail!("Geraet fehlt (?device=<id>)"),
+                _ => Err(failure("device.missing", "Gerät fehlt (?device=<id>)")),
             },
         }
     }
@@ -411,15 +418,23 @@ impl Store {
         .await?)
     }
 
-    pub async fn set_mcp_status(&self, id: Uuid, status: &str, error: &str) -> Result<()> {
+    /// `error` is a code from `failure`, `detail` the technical text behind it.
+    pub async fn set_mcp_status(
+        &self,
+        id: Uuid,
+        status: &str,
+        error: &str,
+        detail: &str,
+    ) -> Result<()> {
         sqlx::query(
-            "UPDATE mcp_servers SET status = $2, last_error = $3,
+            "UPDATE mcp_servers SET status = $2, last_error = $3, last_error_detail = $4,
                  last_ok_at = CASE WHEN $2 = 'ok' THEN NOW() ELSE last_ok_at END
              WHERE id = $1",
         )
         .bind(id)
         .bind(status)
         .bind(error)
+        .bind(detail)
         .execute(&self.pool)
         .await?;
         Ok(())

@@ -26,10 +26,12 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::agent::{Channel, Status, Voice};
-use crate::assistant::{Assistant, NOT_UNDERSTOOD};
+use crate::assistant::Assistant;
 use crate::audio;
+use crate::failure::{self, Failure};
 use crate::llm::{ChatMessage, Provider, ToolDef};
 use crate::mcp;
+use crate::phrases;
 use crate::sentences::SentenceSplitter;
 use crate::speech::{voice_label, SpeechToText, TextToSpeech, VoiceBank};
 use crate::store::Device;
@@ -64,19 +66,61 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-struct ApiError(StatusCode, String);
+/// `{ "code": ..., "detail": ... }`. The code is a key the admin area words (see `failure`); the
+/// detail is technical and only sent for errors that carry a code.
+struct ApiError {
+    status: StatusCode,
+    code: &'static str,
+    detail: String,
+}
+
+impl ApiError {
+    fn new(status: StatusCode, code: &'static str) -> Self {
+        Self {
+            status,
+            code,
+            detail: String::new(),
+        }
+    }
+
+    /// A coded error keeps its code and detail; anything else is only "internal" outside the log.
+    fn of(status: StatusCode, e: anyhow::Error) -> Self {
+        tracing::warn!("{e:#}");
+        match e.chain().find_map(|cause| cause.downcast_ref::<Failure>()) {
+            Some(f) => Self {
+                status,
+                code: f.code,
+                detail: f.detail.clone(),
+            },
+            None => Self::new(status, "internal"),
+        }
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
+        let body = if self.detail.is_empty() {
+            json!({ "code": self.code })
+        } else {
+            json!({ "code": self.code, "detail": self.detail })
+        };
+        (self.status, Json(body)).into_response()
     }
 }
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         tracing::error!("{e:#}");
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))
+        Self::of(StatusCode::INTERNAL_SERVER_ERROR, e)
     }
+}
+
+/// The failed result of a test from the admin area: the code and what the other side said.
+fn test_failure(e: &anyhow::Error) -> serde_json::Value {
+    json!({
+        "code": failure::code_of(e).unwrap_or("internal"),
+        "detail": format!("{e:#}"),
+    })
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -129,16 +173,17 @@ async fn voice_of(state: &AppState, device: &Device) -> ApiResult<Arc<dyn TextTo
     tokio::task::spawn_blocking(move || voices.voice(&id))
         .await
         .map_err(|e| anyhow::anyhow!(e))?
-        .map_err(|e| ApiError(StatusCode::SERVICE_UNAVAILABLE, format!("{e:#}")))
+        .map_err(|e| {
+            tracing::error!("Stimme {}: {e:#}", device.voice);
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "speech.voice_unavailable")
+        })
 }
 
 fn recognizer(state: &AppState) -> ApiResult<Arc<dyn SpeechToText>> {
-    state.stt.clone().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Spracherkennung nicht verfuegbar".into(),
-        )
-    })
+    state
+        .stt
+        .clone()
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "speech.stt_unavailable"))
 }
 
 /// Silence and a press that is too short are answered without asking the model.
@@ -167,12 +212,15 @@ async fn recognize_live(state: &AppState, body: Body) -> ApiResult<String> {
     let mut upload = body.into_data_stream();
     let mut size = 0;
     while let Some(chunk) = upload.next().await {
-        let chunk = chunk.map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("Upload: {e}")))?;
+        let chunk = chunk.map_err(|e| {
+            tracing::warn!("Upload: {e}");
+            ApiError::new(StatusCode::BAD_REQUEST, "speech.upload_broken")
+        })?;
         size += chunk.len();
         if size > MAX_UPLOAD {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "Aufnahme zu lang".into(),
+                "speech.recording_too_long",
             ));
         }
         let _ = tx.send(pieces.push(&chunk));
@@ -283,12 +331,24 @@ async fn talk(
         .store
         .authenticate_device(device_key(&headers), q.device)
         .await
-        .map_err(|e| ApiError(StatusCode::UNAUTHORIZED, format!("{e:#}")))?;
+        .map_err(|e| ApiError::of(StatusCode::UNAUTHORIZED, e))?;
     let tts = voice_of(&state, &device).await?;
     let format = AudioFormat::Frames;
+    let words = phrases::of(&device.voice);
+    // Said out loud, so the speaker does not only blink.
+    if state.stt.is_none() {
+        let sentences = futures_util::stream::iter([Voice::Say(words.stt_unavailable.to_string())]);
+        return Ok(audio_response(
+            tts,
+            device.speed,
+            sentences,
+            format,
+            Some(""),
+        ));
+    }
     let text = recognize_live(&state, body).await?;
     if text.is_empty() {
-        let sentences = futures_util::stream::iter([Voice::Say(NOT_UNDERSTOOD.to_string())]);
+        let sentences = futures_util::stream::iter([Voice::Say(words.not_understood.to_string())]);
         return Ok(audio_response(
             tts,
             device.speed,
@@ -313,7 +373,7 @@ async fn device_or_404(state: &AppState, id: Uuid) -> ApiResult<Device> {
         .store
         .device(id)
         .await?
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Geraet nicht gefunden".into()))
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "device.not_found"))
 }
 
 /// Text chat with a device's personality and memory (admin area).
@@ -341,8 +401,10 @@ async fn transcribe(
     body: Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
     let stt = recognizer(&state)?;
-    let samples = audio::decode_upload(&body, audio::STT_RATE)
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    let samples = audio::decode_upload(&body, audio::STT_RATE).map_err(|e| {
+        tracing::warn!("Aufnahme: {e:#}");
+        ApiError::new(StatusCode::BAD_REQUEST, "speech.bad_audio")
+    })?;
     let seconds = samples.len() as f32 / audio::STT_RATE as f32;
     if is_silence(seconds, audio::rms(&samples)) {
         return Ok(Json(json!({ "text": "" })));
@@ -397,7 +459,7 @@ async fn draft_provider(state: &AppState, draft: ProviderDraft) -> ApiResult<Pro
             .store
             .provider(id, &state.assistant.secrets)
             .await?
-            .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Modell nicht gefunden".into()))?
+            .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "provider.not_found"))?
             .api_key;
     }
     Ok(Provider::new(
@@ -427,7 +489,7 @@ async fn provider_test(
     let ms = started.elapsed().as_millis() as u64;
     Ok(Json(match result {
         Ok(turn) => json!({ "ok": true, "reply": turn.content.trim(), "ms": ms }),
-        Err(e) => json!({ "ok": false, "error": format!("{e:#}"), "ms": ms }),
+        Err(e) => json!({ "ok": false, "error": test_failure(&e), "ms": ms }),
     }))
 }
 
@@ -457,7 +519,7 @@ async fn provider_tool_test(
             "reply": turn.content.trim(),
             "ms": ms,
         }),
-        Err(e) => json!({ "ok": false, "error": format!("{e:#}"), "ms": ms }),
+        Err(e) => json!({ "ok": false, "error": test_failure(&e), "ms": ms }),
     }))
 }
 
@@ -467,6 +529,6 @@ async fn mcp_discover(
 ) -> ApiResult<Json<serde_json::Value>> {
     match mcp::discover(&state.assistant.store, &state.assistant.secrets, id).await {
         Ok(tools) => Ok(Json(json!({ "ok": true, "tools": tools }))),
-        Err(e) => Ok(Json(json!({ "ok": false, "error": format!("{e:#}") }))),
+        Err(e) => Ok(Json(json!({ "ok": false, "error": test_failure(&e) }))),
     }
 }

@@ -51,10 +51,6 @@ const WEEKDAYS: [&str; 7] = [
     "Sonntag",
 ];
 
-pub const NOT_UNDERSTOOD: &str = "Das habe ich leider nicht verstanden.";
-pub const NO_ANSWER: &str = "Ich kann gerade nicht nachdenken, meine Verbindung ist gestört. \
-Versuch es gleich noch einmal.";
-
 pub struct Assistant {
     pub llm: Arc<dyn ChatModel>,
     pub store: Store,
@@ -72,6 +68,7 @@ impl Assistant {
         channel: Channel,
     ) -> impl Stream<Item = Voice> + Send {
         async_stream::stream! {
+            let words = crate::phrases::of(&device.voice);
             let (tx, mut rx) = mpsc::channel(8);
             let assistant = Arc::clone(&self);
             let task = tokio::spawn(async move {
@@ -81,7 +78,7 @@ impl Assistant {
                 yield voice;
             }
             if task.await.is_err() {
-                yield Voice::Say(NO_ANSWER.to_string());
+                yield Voice::Say(words.no_answer.to_string());
             }
         }
     }

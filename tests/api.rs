@@ -880,7 +880,7 @@ async fn iteration_limit_stops_the_loop() {
     s.llm.push(tool_turn(true, ""));
     s.llm.push(tool_turn(false, "Sollte nicht drankommen."));
     let reply = chat(&s, device, "Loop").await;
-    assert_eq!(reply["reply"], sprachassistent::agent::TOO_LONG);
+    assert_eq!(reply["reply"], sprachassistent::phrases::of("").too_long);
     assert_eq!(reply["status"], "failed");
     assert_eq!(*tools.calls.lock().unwrap(), 1);
 }

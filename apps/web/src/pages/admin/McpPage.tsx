@@ -15,9 +15,10 @@ import {
   VeitStatusBadge,
 } from "@veit/react-controls";
 import { VeitOverlayDialog, VeitOverlayEditDialog, useDialogFormBaseline, useManagedOverlayDialogBinding } from "@veit/react-dialog";
-import { adminApi, errorText, type McpInput, type McpServer, type McpTool, type NativeTool, type ToolEffect } from "../../api";
+import { adminApi, codeText, errorText, type McpInput, type McpServer, type McpTool, type NativeTool, type ToolEffect } from "../../api";
 import type { MessageKey } from "../../i18n/de";
 import { useI18n } from "../../i18n/I18nProvider";
+import { ErrorDetails } from "./ErrorDetails";
 
 const PRESET_URL: Record<string, string> = {
   homeassistant: "",
@@ -315,9 +316,10 @@ function ToolsDialog({
           <p className="m-0 text-sm text-muted-foreground">{tf(count === 1 ? "mcpToolCountOne" : "mcpToolCount", { count })}</p>
           {server.last_error && (
             <VeitStatusBadge variant="destructive" shape="rounded">
-              {server.last_error}
+              {codeText(server.last_error)}
             </VeitStatusBadge>
           )}
+          <ErrorDetails detail={server.last_error_detail} />
           <div className="flex flex-wrap gap-2">
             {server.auth_type === "oauth" && (
               <VeitButton variant="secondary" onClick={() => window.location.assign(`/v1/admin/mcp/${server.id}/oauth/start`)}>
@@ -387,7 +389,7 @@ export function McpPage() {
         live.map(async (server) => {
           try {
             const result = await adminApi.discoverMcp(server.id);
-            if (!result.ok && result.error) failed = result.error;
+            if (!result.ok && result.error) failed = `${server.name}: ${codeText(result.error.code)}`;
           } catch (error) {
             failed = errorText(error);
           }
@@ -417,7 +419,10 @@ export function McpPage() {
 
   useEffect(() => {
     if (params.get("oauth") === "ok") setNotice(t("mcpOauthOk"));
-    if (params.get("oauth") === "error") setNotice(t("mcpOauthError"));
+    if (params.get("oauth") === "error") {
+      const code = params.get("code");
+      setNotice(code ? `${t("mcpOauthError")} ${codeText(code)}` : t("mcpOauthError"));
+    }
   }, [params, t]);
 
   const saveTool = async (tool: McpTool, permission: Permission) => {

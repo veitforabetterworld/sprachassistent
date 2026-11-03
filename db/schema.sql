@@ -123,11 +123,17 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   secret_enc TEXT NOT NULL DEFAULT '',
   oauth_enc TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'unknown',
+  -- A code from src/failure.rs; the admin area words it. The detail is technical.
   last_error TEXT NOT NULL DEFAULT '',
+  last_error_detail TEXT NOT NULL DEFAULT '',
   last_ok_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS mcp_servers_user ON mcp_servers (user_id);
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS last_error_detail TEXT NOT NULL DEFAULT '';
+-- Older rows kept the text itself as the error.
+UPDATE mcp_servers SET last_error_detail = last_error, last_error = 'mcp.failed'
+WHERE last_error <> '' AND last_error NOT LIKE 'mcp.%';
 
 CREATE TABLE IF NOT EXISTS mcp_tools (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

@@ -1,4 +1,4 @@
-import express, { Router, type NextFunction, type Request, type Response } from "express";
+import express, { Router, type Request } from "express";
 import { z } from "zod";
 import { getAuthUser } from "@veit/auth-server/express";
 import {
@@ -11,7 +11,7 @@ import {
   verificationRequired,
 } from "./accounts.js";
 import { pool } from "./db.js";
-import { handle, HttpError, parse, toVoice, toVoiceBuffer } from "./http.js";
+import { handle, HttpError, parse, sendError, toVoice, toVoiceBuffer } from "./http.js";
 import { registerMcp } from "./mcp.js";
 import { openSecret, seal } from "./secrets.js";
 import { PASSWORD_SETTINGS, getSetting, listSettings, saveSettings } from "./settings.js";
@@ -22,14 +22,14 @@ const uuid = z.string().uuid();
 
 async function ownerId(req: Request): Promise<string | number> {
   const user = getAuthUser(req);
-  if (!user) throw new HttpError(401, "Bitte anmelden");
+  if (!user) throw new HttpError(401, "auth.unauthenticated");
   return user.id;
 }
 
 /** 404 for a device that belongs to someone else, so one user cannot read another's memory. */
 async function ownedDevice(req: Request, id: string): Promise<string> {
   const row = await pool.query(`SELECT 1 FROM devices WHERE id = $1 AND user_id = $2`, [id, await ownerId(req)]);
-  if (!row.rows[0]) throw new HttpError(404, "Gerät nicht gefunden");
+  if (!row.rows[0]) throw new HttpError(404, "device.not_found");
   return id;
 }
 
@@ -37,7 +37,7 @@ async function ownedDevice(req: Request, id: string): Promise<string> {
 async function ownedProvider(req: Request, id: string | null): Promise<string | null> {
   if (!id) return null;
   const row = await pool.query(`SELECT 1 FROM llm_providers WHERE id = $1 AND user_id = $2`, [id, await ownerId(req)]);
-  if (!row.rows[0]) throw new HttpError(404, "Modell nicht gefunden");
+  if (!row.rows[0]) throw new HttpError(404, "provider.not_found");
   return id;
 }
 
@@ -99,7 +99,7 @@ export function adminRouter(): Router {
   router.use((req, res, next) => {
     const user = getAuthUser(req);
     if (!user) {
-      res.status(401).json({ error: "Bitte anmelden" });
+      res.status(401).json({ code: "auth.unauthenticated" });
       return;
     }
     const adminOnly = req.path.startsWith("/settings") || req.path.startsWith("/users");
@@ -108,7 +108,7 @@ export function adminRouter(): Router {
       return;
     }
     isAdmin(user.id)
-      .then((ok) => (ok ? next() : res.status(403).json({ error: "Kein Adminkonto" })))
+      .then((ok) => (ok ? next() : res.status(403).json({ code: "admin.required" })))
       .catch(next);
   });
 
@@ -148,7 +148,7 @@ export function adminRouter(): Router {
     "/users/:id",
     handle(async (req, res) => {
       const actor = getAuthUser(req);
-      if (!actor) throw new HttpError(401, "Bitte anmelden");
+      if (!actor) throw new HttpError(401, "auth.unauthenticated");
       await removeAccount(actor.id, parse(userIdParam, req.params.id));
       res.status(204).end();
     }),
@@ -213,7 +213,7 @@ export function adminRouter(): Router {
          RETURNING id, name, base_url, model, enabled, priority, nudge_tools, api_key`,
         [id, p.name, p.base_url, p.api_key ? seal(p.api_key) : "", p.model, p.enabled, p.priority, p.nudge_tools, await ownerId(req)],
       );
-      if (!row.rows[0]) throw new HttpError(404, "Modell nicht gefunden");
+      if (!row.rows[0]) throw new HttpError(404, "provider.not_found");
       res.json(publicProvider(row.rows[0]));
     }),
   );
@@ -224,7 +224,7 @@ export function adminRouter(): Router {
         await ownedProvider(req, parse(uuid, req.params.id)),
         await ownerId(req),
       ]);
-      if (result.rowCount === 0) throw new HttpError(404, "Modell nicht gefunden");
+      if (result.rowCount === 0) throw new HttpError(404, "provider.not_found");
       res.status(204).end();
     }),
   );
@@ -236,9 +236,9 @@ export function adminRouter(): Router {
         `SELECT api_key FROM llm_providers WHERE id = $1 AND user_id = $2`,
         [await ownedProvider(req, parse(uuid, req.params.id)), await ownerId(req)],
       );
-      if (!row.rows[0]) throw new HttpError(404, "Modell nicht gefunden");
+      if (!row.rows[0]) throw new HttpError(404, "provider.not_found");
       const key = openSecret(row.rows[0].api_key);
-      if (row.rows[0].api_key.startsWith("enc1:") && !key) throw new HttpError(500, "CREDENTIALS_KEY fehlt");
+      if (row.rows[0].api_key.startsWith("enc1:") && !key) throw new HttpError(500, "secrets.key_missing");
       res.set("Cache-Control", "no-store").json({ key });
     }),
   );
@@ -327,7 +327,7 @@ export function adminRouter(): Router {
           await ownerId(req),
         ],
       );
-      if (!row.rows[0]) throw new HttpError(404, "Gerät nicht gefunden");
+      if (!row.rows[0]) throw new HttpError(404, "device.not_found");
       res.json(row.rows[0]);
     }),
   );
@@ -356,7 +356,7 @@ export function adminRouter(): Router {
     "/transcribe",
     express.raw({ type: ["audio/wav", "audio/wave", "application/octet-stream"], limit: "8mb" }),
     handle(async (req, res) => {
-      if (!Buffer.isBuffer(req.body) || req.body.length === 0) throw new HttpError(400, "Audio fehlt");
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) throw new HttpError(400, "speech.no_audio");
       await toVoiceBuffer(res, "/internal/transcribe", req.body, "audio/wav");
     }),
   );
@@ -390,7 +390,7 @@ export function adminRouter(): Router {
          WHERE r.id = $1 AND d.user_id = $2`,
         [parse(uuid, req.params.id), await ownerId(req)],
       );
-      if (!run.rows[0]) throw new HttpError(404, "Lauf nicht gefunden");
+      if (!run.rows[0]) throw new HttpError(404, "run.not_found");
       const steps = await pool.query(
         `SELECT seq, kind, name, payload, duration_ms, error FROM agent_run_steps WHERE run_id = $1 ORDER BY seq`,
         [req.params.id],
@@ -446,14 +446,7 @@ export function adminRouter(): Router {
 
   registerMcp(router);
 
-  router.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    if (error instanceof HttpError) {
-      res.status(error.status).json({ error: error.message });
-      return;
-    }
-    console.error(error);
-    res.status(500).json({ error: "Interner Fehler" });
-  });
+  router.use(sendError);
 
   return router;
 }

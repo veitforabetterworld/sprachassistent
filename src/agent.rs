@@ -10,10 +10,12 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::assistant::{self, ToolRules, NO_ANSWER};
+use crate::assistant::{self, ToolRules};
 use crate::authz::{approval_word, frame_tool_result, truncate, validate_args, Approval, Effect};
 use crate::context::{self, ReplyCut};
-use crate::llm::{model_tool_names, ChatMessage, ChatModel, ToolCall, ToolDef, ALL_AT_LIMIT};
+use crate::failure;
+use crate::llm::{model_tool_names, ChatMessage, ChatModel, ToolCall, ToolDef};
+use crate::phrases::{self, Phrases};
 use crate::runs::{RunGuard, CANCELLED, COMPLETED, FAILED, WAITING};
 use crate::secrets::Secrets;
 use crate::sentences::SentenceSplitter;
@@ -35,8 +37,6 @@ const CONTEXT_ARG: &str = "kontext";
 const APPROVAL_TTL_SECS: i64 = 600;
 const STILL_BUSY_AFTER: Duration = Duration::from_secs(15);
 const HISTORY_CHARS: usize = 180;
-
-pub const TOO_LONG: &str = "Das dauert mir zu lange. Versuch es später noch einmal.";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
@@ -101,17 +101,18 @@ pub async fn run(
     channel: Channel,
     say: Option<mpsc::Sender<Voice>>,
 ) -> TurnResult {
+    let words = phrases::of(&device.voice);
     let Some(user_id) = device.user_id else {
-        speak(&say, NO_ANSWER).await;
-        return done(None, NO_ANSWER, FAILED);
+        speak(&say, words.no_answer).await;
+        return done(None, words.no_answer, FAILED);
     };
     let guard =
         match RunGuard::start(&store, user_id, device.id, channel.as_str(), &user_text).await {
             Ok(guard) => guard,
             Err(e) => {
                 tracing::error!("Lauf nicht angelegt: {e:#}");
-                speak(&say, NO_ANSWER).await;
-                return done(None, NO_ANSWER, FAILED);
+                speak(&say, words.no_answer).await;
+                return done(None, words.no_answer, FAILED);
             }
         };
 
@@ -235,7 +236,7 @@ async fn stream_reply(
         Ok(list) => list,
         Err(e) => {
             tracing::error!("{e:#}");
-            return fail(&say, &mut guard, NO_ANSWER).await;
+            return fail(&say, &mut guard, phrases::of(&device.voice).no_answer).await;
         }
     };
     let started = Instant::now();
@@ -278,7 +279,7 @@ async fn stream_reply(
         }
         Err(e) => {
             tracing::error!("{}: {e:#}", device.name);
-            let reply = provider_failure_reply(&e.to_string());
+            let reply = provider_failure_reply(phrases::of(&device.voice), &e);
             let _ = store.add_message(device.id, "user", user_text).await;
             let _ = store.add_message(device.id, "assistant", &reply).await;
             return fail(&say, &mut guard, &reply).await;
@@ -288,8 +289,10 @@ async fn stream_reply(
     remember(&store, &device, new_context).await;
     if reply.is_empty() {
         let _ = store.add_message(device.id, "user", user_text).await;
-        let _ = store.add_message(device.id, "assistant", NO_ANSWER).await;
-        return fail(&say, &mut guard, NO_ANSWER).await;
+        let _ = store
+            .add_message(device.id, "assistant", phrases::of(&device.voice).no_answer)
+            .await;
+        return fail(&say, &mut guard, phrases::of(&device.voice).no_answer).await;
     }
     let _ = store.add_message(device.id, "user", user_text).await;
     let _ = store.add_message(device.id, "assistant", &reply).await;
@@ -418,7 +421,7 @@ async fn drive(
         Ok(list) => list,
         Err(e) => {
             tracing::error!("{e:#}");
-            return fail(&say, &mut guard, NO_ANSWER).await;
+            return fail(&say, &mut guard, phrases::of(&device.voice).no_answer).await;
         }
     };
     let aliases = model_tool_names(offers.iter().map(|offer| offer.name.as_str()));
@@ -466,7 +469,7 @@ async fn drive(
     let mut written_context: Option<String> = None;
     loop {
         if started.elapsed() > budget || iterations >= limit {
-            return fail(&say, &mut guard, TOO_LONG).await;
+            return fail(&say, &mut guard, phrases::of(&device.voice).too_long).await;
         }
         iterations += 1;
         // After a tool result the old chat stays out; the context in front of the question
@@ -554,7 +557,7 @@ Argumente aus dem vorherigen Werkzeugergebnis übernehmen.",
                     continue;
                 }
                 tracing::error!("{}: {e:#}", device.name);
-                let reply = provider_failure_reply(&detail);
+                let reply = provider_failure_reply(phrases::of(&device.voice), &e);
                 if !user_saved && !user_text.is_empty() {
                     let _ = store.add_message(device.id, "user", user_text).await;
                 }
@@ -613,9 +616,9 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
         if turn.tool_calls.is_empty() {
             let (answer, new_context) = context::split(&turn.content);
             remember(&store, &device, new_context.or(written_context.take())).await;
-            let reply = spoken_reply(&answer);
+            let reply = spoken_reply(phrases::of(&device.voice), &answer);
             if reply.is_empty() {
-                return fail(&say, &mut guard, NO_ANSWER).await;
+                return fail(&say, &mut guard, phrases::of(&device.voice).no_answer).await;
             }
             // Streamed text has been spoken already.
             if !spoke && !speak(&say, &reply).await {
@@ -863,7 +866,7 @@ Erst nach dem neuen Lese-Ergebnis einzeln aufrufen, falls es noch nötig ist."
             ));
         }
         if !confirm.is_empty() {
-            let question = confirm_question(&confirm, &offers);
+            let question = confirm_question(phrases::of(&device.voice), &confirm, &offers);
             if !speak(&say, &question).await {
                 guard
                     .finish(
@@ -955,7 +958,7 @@ async fn execute(
     out
 }
 
-fn confirm_question(calls: &[ToolCall], offers: &[ToolOffer]) -> String {
+fn confirm_question(words: &Phrases, calls: &[ToolCall], offers: &[ToolOffer]) -> String {
     let labels: Vec<String> = calls
         .iter()
         .map(|call| {
@@ -966,14 +969,7 @@ fn confirm_question(calls: &[ToolCall], offers: &[ToolOffer]) -> String {
                 .unwrap_or_else(|| call.name.clone())
         })
         .collect();
-    if labels.len() == 1 {
-        format!("Soll ich {} ausführen? Sag ja oder nein.", labels[0])
-    } else {
-        format!(
-            "Soll ich diese Aktionen ausführen: {}? Sag ja oder nein.",
-            labels.join(", ")
-        )
-    }
+    words.confirm(&labels)
 }
 
 /// Sends the text as spoken sentences. Returns false when the listener is gone.
@@ -1057,15 +1053,13 @@ fn should_nudge(
         && lookup_offered
 }
 
-const RATE_LIMIT_REPLY: &str = "Alle KI-Modelle sind gerade am Limit. Versuch es gleich nochmal.";
-
-fn provider_failure_reply(detail: &str) -> String {
-    if detail.contains("tool_use_failed") {
-        "Dafür habe ich kein passendes Werkzeug gefunden.".into()
-    } else if detail.contains(ALL_AT_LIMIT) {
-        RATE_LIMIT_REPLY.into()
+fn provider_failure_reply(words: &Phrases, e: &anyhow::Error) -> String {
+    if e.to_string().contains("tool_use_failed") {
+        words.no_tool.into()
+    } else if failure::code_of(e) == Some("llm.at_limit") {
+        words.at_limit.into()
     } else {
-        "Die KI-Modelle sind gerade nicht erreichbar. Versuch es gleich nochmal.".into()
+        words.unreachable.into()
     }
 }
 
@@ -1121,7 +1115,7 @@ impl Kinds {
 }
 
 /// Groq sometimes prints the call as text after a bad example in the history.
-fn spoken_reply(content: &str) -> String {
+fn spoken_reply(words: &Phrases, content: &str) -> String {
     let cut = content
         .find("<tool_call>")
         .or_else(|| content.find("<function="))
@@ -1131,7 +1125,7 @@ fn spoken_reply(content: &str) -> String {
         return spoken.to_string();
     }
     if cut < content.len() {
-        "Das habe ich so nicht ausführen können.".into()
+        words.not_done.into()
     } else {
         String::new()
     }
@@ -1284,11 +1278,13 @@ mod tests {
 
     #[test]
     fn limit_is_only_reported_when_every_model_is_at_it() {
-        let all = format!("kein KI-Modell erreichbar, {ALL_AT_LIMIT} (Groq: HTTP 429)");
-        assert_eq!(provider_failure_reply(&all), RATE_LIMIT_REPLY);
-        let mixed = "kein KI-Modell erreichbar (Google Gemini: HTTP 400; Groq: HTTP 429)";
-        assert_ne!(provider_failure_reply(mixed), RATE_LIMIT_REPLY);
-        assert!(!provider_failure_reply("Groq: HTTP 401").contains("401"));
+        let words = phrases::of("");
+        let all = failure::failure("llm.at_limit", "Groq: HTTP 429");
+        assert_eq!(provider_failure_reply(words, &all), words.at_limit);
+        let mixed = failure::failure("llm.bad_request", "Gemini: HTTP 400; Groq: HTTP 429");
+        assert_ne!(provider_failure_reply(words, &mixed), words.at_limit);
+        let key = failure::failure("llm.unauthorized", "Groq: HTTP 401");
+        assert!(!provider_failure_reply(words, &key).contains("401"));
     }
 
     fn hints(read_only: Option<bool>, open_world: Option<bool>) -> ToolHints {

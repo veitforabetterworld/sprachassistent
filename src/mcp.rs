@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use rmcp::model::{CallToolRequestParams, ToolAnnotations};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::StreamableHttpClientTransport;
@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::authz::{default_effect, Effect};
+use crate::failure::{self, failure};
 use crate::secrets::{redact, Secrets};
 use crate::store::{McpServer, Store};
 
@@ -30,27 +31,28 @@ pub struct DiscoveredTool {
 
 pub async fn discover(store: &Store, secrets: &Secrets, server_id: Uuid) -> Result<usize> {
     let Some(server) = store.mcp_server(server_id).await? else {
-        anyhow::bail!("MCP-Server nicht gefunden");
+        return Err(failure("mcp.not_found", "MCP-Server nicht gefunden"));
     };
     if !server.enabled {
-        anyhow::bail!("MCP-Server ist aus");
+        return Err(failure("mcp.disabled", "MCP-Server ist aus"));
     }
     let found = match connect_and_list(&server, secrets, store).await {
         Ok(tools) => tools,
         Err(e) => {
-            let message = redact(&format!("{e:#}"));
+            let detail = redact(&format!("{e:#}"));
             store
                 .set_mcp_status(
                     server.id,
                     "error",
-                    &message.chars().take(300).collect::<String>(),
+                    failure::code_of(&e).unwrap_or("mcp.failed"),
+                    &detail.chars().take(300).collect::<String>(),
                 )
                 .await?;
             return Err(e);
         }
     };
     store.replace_mcp_tools(server.id, &found).await?;
-    store.set_mcp_status(server.id, "ok", "").await?;
+    store.set_mcp_status(server.id, "ok", "", "").await?;
     Ok(found.len())
 }
 
@@ -62,7 +64,7 @@ pub async fn call(
     args: Value,
 ) -> Result<String> {
     let Some(server) = store.mcp_server(server_id).await? else {
-        anyhow::bail!("MCP-Server nicht gefunden");
+        return Err(failure("mcp.not_found", "MCP-Server nicht gefunden"));
     };
     let bearer = bearer_for(&server, secrets, store).await?;
     let mut last = None;
@@ -80,7 +82,7 @@ pub async fn call(
             }
         }
     }
-    Err(last.unwrap_or_else(|| anyhow!("MCP-Aufruf fehlgeschlagen")))
+    Err(last.unwrap_or_else(|| failure("mcp.failed", "MCP-Aufruf fehlgeschlagen")))
 }
 
 async fn connect_and_list(
@@ -89,17 +91,20 @@ async fn connect_and_list(
     store: &Store,
 ) -> Result<Vec<DiscoveredTool>> {
     if server.transport != "http" {
-        anyhow::bail!("stdio ist nicht freigeschaltet");
+        return Err(failure(
+            "mcp.stdio_disabled",
+            "stdio ist nicht freigeschaltet",
+        ));
     }
     if server.url.trim().is_empty() {
-        anyhow::bail!("Adresse fehlt");
+        return Err(failure("mcp.no_url", "Adresse fehlt"));
     }
     let bearer = bearer_for(server, secrets, store).await?;
     let mut running = connect(&server.url, &bearer).await?;
     let tools = tokio::time::timeout(TOOL_TIMEOUT, running.list_all_tools())
         .await
-        .map_err(|_| anyhow!("Zeitüberschreitung bei der Werkzeugliste"))?
-        .map_err(|e| anyhow!(redact(&e.to_string())))?;
+        .map_err(|_| failure("mcp.timeout", "Zeitüberschreitung bei der Werkzeugliste"))?
+        .map_err(|e| remote_failure(&e.to_string()))?;
     let _ = running.close().await;
     Ok(tools
         .into_iter()
@@ -138,8 +143,8 @@ async fn call_once(url: &str, bearer: &str, name: &str, args: Value) -> Result<S
     let params = CallToolRequestParams::new(name.to_string()).with_arguments(object);
     let result = tokio::time::timeout(TOOL_TIMEOUT, running.call_tool(params))
         .await
-        .map_err(|_| anyhow!("Zeitüberschreitung"))?
-        .map_err(|e| anyhow!(redact(&e.to_string())))?;
+        .map_err(|_| failure("mcp.timeout", "Zeitüberschreitung"))?
+        .map_err(|e| remote_failure(&e.to_string()))?;
     let _ = running.close().await;
     let mut parts = Vec::new();
     for block in &result.content {
@@ -182,7 +187,26 @@ async fn connect(
     let transport = StreamableHttpClientTransport::from_config(config);
     ().serve(transport)
         .await
-        .map_err(|e| anyhow!(redact(&e.to_string())))
+        .map_err(|e| remote_failure(&e.to_string()))
+}
+
+/// rmcp only gives text; the HTTP status and connection errors in it are enough for a code.
+fn remote_failure(text: &str) -> anyhow::Error {
+    let lower = text.to_ascii_lowercase();
+    let code = if ["401", "403", "unauthorized", "forbidden"]
+        .iter()
+        .any(|hint| lower.contains(hint))
+    {
+        "mcp.unauthorized"
+    } else if ["connect", "dns", "refused", "resolve"]
+        .iter()
+        .any(|hint| lower.contains(hint))
+    {
+        "mcp.unreachable"
+    } else {
+        "mcp.failed"
+    };
+    failure(code, redact(text))
 }
 
 async fn bearer_for(server: &McpServer, secrets: &Secrets, store: &Store) -> Result<String> {
@@ -190,7 +214,10 @@ async fn bearer_for(server: &McpServer, secrets: &Secrets, store: &Store) -> Res
         "none" | "" => Ok(String::new()),
         "bearer" => secrets.decrypt(&server.secret_enc),
         "oauth" => oauth_access(server, secrets, store).await,
-        other => anyhow::bail!("unbekannte Anmeldung {other}"),
+        other => Err(failure(
+            "mcp.failed",
+            format!("unbekannte Anmeldung {other}"),
+        )),
     }
 }
 
@@ -204,7 +231,10 @@ struct OAuthBlob {
 async fn oauth_access(server: &McpServer, secrets: &Secrets, store: &Store) -> Result<String> {
     let raw = secrets.decrypt(&server.oauth_enc)?;
     let mut blob: OAuthBlob = if raw.is_empty() {
-        anyhow::bail!("Google ist nicht verbunden");
+        return Err(failure(
+            "mcp.oauth_not_connected",
+            "Google ist nicht verbunden",
+        ));
     } else {
         serde_json::from_str(&raw).unwrap_or_default()
     };
@@ -213,7 +243,10 @@ async fn oauth_access(server: &McpServer, secrets: &Secrets, store: &Store) -> R
         return Ok(blob.access_token);
     }
     if blob.refresh_token.is_empty() {
-        anyhow::bail!("Google ist nicht verbunden");
+        return Err(failure(
+            "mcp.oauth_not_connected",
+            "Google ist nicht verbunden",
+        ));
     }
     let settings = store.settings().await?;
     let client_id = settings
@@ -227,7 +260,10 @@ async fn oauth_access(server: &McpServer, secrets: &Secrets, store: &Store) -> R
             .unwrap_or(""),
     )?;
     if client_id.is_empty() || client_secret.is_empty() {
-        anyhow::bail!("Google-OAuth ist nicht eingerichtet");
+        return Err(failure(
+            "mcp.oauth_not_configured",
+            "Google-OAuth ist nicht eingerichtet",
+        ));
     }
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
@@ -244,12 +280,18 @@ async fn oauth_access(server: &McpServer, secrets: &Secrets, store: &Store) -> R
         .await?;
     if !resp.status().is_success() {
         let status = resp.status();
-        anyhow::bail!("Google-Token erneuern: HTTP {status}");
+        return Err(failure(
+            "mcp.oauth_refresh_failed",
+            format!("Google-Token erneuern: HTTP {status}"),
+        ));
     }
     let v: Value = resp.json().await?;
     blob.access_token = v["access_token"].as_str().unwrap_or("").to_string();
     if blob.access_token.is_empty() {
-        anyhow::bail!("Google-Token ohne access_token");
+        return Err(failure(
+            "mcp.oauth_refresh_failed",
+            "Google-Token ohne access_token",
+        ));
     }
     if let Some(refresh) = v["refresh_token"].as_str() {
         if !refresh.is_empty() {

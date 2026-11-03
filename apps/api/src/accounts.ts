@@ -130,19 +130,19 @@ export async function approveAccount(id: string): Promise<AccountRow> {
      WHERE id = $1 RETURNING ${ACCOUNT_COLUMNS}`,
     [id],
   );
-  if (!result.rows[0]) throw new HttpError(404, "Konto nicht gefunden");
+  if (!result.rows[0]) throw new HttpError(404, "auth.user_not_found");
   return result.rows[0];
 }
 
 export async function removeAccount(actorId: UserId, targetId: string): Promise<void> {
-  if (String(actorId) === targetId) throw new HttpError(400, "Das eigene Konto löschst du unter Konto.");
+  if (String(actorId) === targetId) throw new HttpError(400, "account.delete_self");
   const exists = await pool.query(`SELECT 1 FROM users WHERE id = $1`, [targetId]);
-  if (!exists.rows[0]) throw new HttpError(404, "Konto nicht gefunden");
+  if (!exists.rows[0]) throw new HttpError(404, "auth.user_not_found");
   try {
     await authService.deleteAccount(targetId);
   } catch (error) {
     if (isAuthError(error) && error.code === "auth.last_admin") {
-      throw new HttpError(400, "Das letzte Adminkonto bleibt.");
+      throw new HttpError(400, "auth.last_admin");
     }
     throw error;
   }
@@ -162,13 +162,11 @@ function requestInfo(req: Request): RequestInfo {
 
 export async function sendResetLink(targetId: string, req: Request): Promise<void> {
   const row = await pool.query<{ email: string }>(`SELECT email FROM users WHERE id = $1`, [targetId]);
-  if (!row.rows[0]) throw new HttpError(404, "Konto nicht gefunden");
+  if (!row.rows[0]) throw new HttpError(404, "auth.user_not_found");
   try {
     await authService.requestPasswordReset(row.rows[0].email, requestInfo(req));
   } catch (error) {
     if (!isAuthError(error)) throw error;
-    if (error.code === "auth.mail_unavailable") throw new HttpError(503, "E-Mail ist nicht eingerichtet.");
-    if (error.code === "auth.password_reset_too_many_requests") throw new HttpError(429, "Zu viele Links für diese Adresse.");
     throw new HttpError(error.status, error.code);
   }
 }
@@ -226,7 +224,7 @@ export const apiKeys = createExpressApiKeys({
 
 export async function adminDecision(req: Request) {
   const user = getAuthUser(req);
-  if (!user) return { ok: false as const, status: 401, error: "Bitte anmelden" };
-  if (!(await isAdmin(user.id))) return { ok: false as const, status: 403, error: "Kein Adminkonto" };
+  if (!user) return { ok: false as const, status: 401, error: "auth.unauthenticated" };
+  if (!(await isAdmin(user.id))) return { ok: false as const, status: 403, error: "admin.required" };
   return { ok: true as const };
 }
