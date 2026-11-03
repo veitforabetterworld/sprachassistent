@@ -760,7 +760,7 @@ async fn frames_tell_the_device_what_happens_before_it_speaks() {
     // The busy line is spoken right after the first answer, the tool runs, then the reply.
     assert_eq!(
         statuses,
-        ["thinking", "speaking", "home", "thinking"],
+        ["thinking", "speaking", "tool:echo", "thinking"],
         "{statuses:?}"
     );
     let spoken = "Einen Moment.".chars().count() + "Erledigt.".chars().count();

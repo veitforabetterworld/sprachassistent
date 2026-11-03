@@ -56,25 +56,24 @@ pub enum Voice {
     Status(Status),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Phases that hold for any chatbot, whatever tools it has.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     /// The model is writing.
     Thinking,
-    /// Searching or reading web pages.
-    Research,
-    /// Asking or switching something in the house.
-    Home,
+    /// A tool is running; the name is only shown in logs, the device does not interpret it.
+    Tool(String),
     /// The first sentence is being turned into speech.
     Speaking,
 }
 
 impl Status {
-    pub fn as_str(self) -> &'static str {
+    /// `thinking`, `tool:<name>` or `speaking`.
+    pub fn label(&self) -> String {
         match self {
-            Self::Thinking => "thinking",
-            Self::Research => "research",
-            Self::Home => "home",
-            Self::Speaking => "speaking",
+            Self::Thinking => "thinking".into(),
+            Self::Tool(name) => format!("tool:{name}"),
+            Self::Speaking => "speaking".into(),
         }
     }
 }
@@ -716,14 +715,6 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
             }
         }
         let saw_action = kept_action;
-        if kept
-            .iter()
-            .any(|call| tool_kind(&call.name) == ToolKind::Research)
-        {
-            show(&say, Status::Research).await;
-        } else if !kept.is_empty() {
-            show(&say, Status::Home).await;
-        }
         research_steps += research_now + repeated;
         // Asking again for what is already above means the model has what it can get: answer.
         let only_repeats = repeated > 0 && research_now == 0 && !saw_action && !saw_state;
@@ -920,6 +911,7 @@ async fn execute(
     let mut out = Vec::new();
     let mut warned = false;
     for call in calls {
+        show(say, Status::Tool(call.name.clone())).await;
         let schema = offers
             .iter()
             .find(|offer| offer.name == call.name)

@@ -4,8 +4,10 @@
 //! from the admin area (`Authorization: Bearer spa_...` or `X-API-Key`).
 //!
 //! `/v1/talk` answers in frames, so the device can show what the assistant is doing before it
-//! speaks: one byte kind (1 audio as s16le mono at `X-Sample-Rate`, 2 status as ASCII), four bytes
-//! length (little endian), then the payload. Statuses: thinking, research, home, speaking.
+//! speaks: one byte kind (1 audio as s16le mono at `X-Sample-Rate`, 2 status as UTF-8), four
+//! bytes length (little endian), then the payload. Statuses: `thinking`, `tool:<name>`, `speaking`.
+//! They name the phase of the reply, never what a tool does: each chatbot has its own tools.
+//!
 //! Internal (localhost only, used by apps/api for the admin area): `/internal/...`.
 
 use std::sync::Arc;
@@ -230,13 +232,13 @@ fn audio_response(
                 Voice::Say(sentence) => sentence,
                 Voice::Status(status) => {
                     if format == AudioFormat::Frames {
-                        yield Ok(frame(FRAME_STATUS, status.as_str().as_bytes()));
+                        yield Ok(frame(FRAME_STATUS, status.label().as_bytes()));
                     }
                     continue;
                 }
             };
             if format == AudioFormat::Frames && !spoken {
-                yield Ok(frame(FRAME_STATUS, Status::Speaking.as_str().as_bytes()));
+                yield Ok(frame(FRAME_STATUS, Status::Speaking.label().as_bytes()));
             }
             let tts = Arc::clone(&tts);
             match tokio::task::spawn_blocking(move || tts.synthesize(&sentence, speed)).await {
