@@ -56,12 +56,12 @@ CREATE TABLE IF NOT EXISTS devices (
   speed REAL NOT NULL DEFAULT 1.0,
   persona TEXT NOT NULL DEFAULT '',
   provider_id UUID REFERENCES llm_providers(id) ON DELETE SET NULL,
-  history_messages INTEGER NOT NULL DEFAULT 12,
-  memory_extraction BOOLEAN NOT NULL DEFAULT true,
   max_iterations INTEGER NOT NULL DEFAULT 6,
   busy_phrase TEXT NOT NULL DEFAULT 'Einen Moment.',
   still_busy_phrase TEXT NOT NULL DEFAULT 'Ich bin noch dran.',
   tools_enabled BOOLEAN NOT NULL DEFAULT true,
+  -- The only memory: what the model itself wrote down for later conversations (500 characters).
+  context TEXT NOT NULL DEFAULT '',
   -- Owner of the device. Null until the web API assigns the first admin (users may not exist yet).
   user_id BIGINT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -84,15 +84,6 @@ CREATE TABLE IF NOT EXISTS device_messages (
 );
 CREATE INDEX IF NOT EXISTS device_messages_device ON device_messages (device_id, id);
 
-CREATE TABLE IF NOT EXISTS device_facts (
-  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-  content TEXT NOT NULL,
-  origin TEXT NOT NULL DEFAULT 'extraction',
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS device_facts_device ON device_facts (device_id, id);
-
 -- Upgrades of databases created before the agent tables. Fresh installs already have the columns.
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS user_id BIGINT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS max_iterations INTEGER NOT NULL DEFAULT 6;
@@ -100,7 +91,11 @@ ALTER TABLE devices ADD COLUMN IF NOT EXISTS busy_phrase TEXT NOT NULL DEFAULT '
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS still_busy_phrase TEXT NOT NULL DEFAULT 'Ich bin noch dran.';
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS tools_enabled BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE device_messages ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
-ALTER TABLE device_facts ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'extraction';
+-- Facts, their extraction and the history setting gave way to the context the model rewrites.
+DROP TABLE IF EXISTS device_facts;
+ALTER TABLE devices DROP COLUMN IF EXISTS history_messages;
+ALTER TABLE devices DROP COLUMN IF EXISTS memory_extraction;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS context TEXT NOT NULL DEFAULT '';
 -- Every model may call tools now; the chatbot's tools_enabled is the only switch.
 ALTER TABLE llm_providers DROP COLUMN IF EXISTS supports_tools;
 ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS nudge_tools BOOLEAN NOT NULL DEFAULT false;

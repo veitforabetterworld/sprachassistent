@@ -107,8 +107,8 @@ impl ToolExecutor for LiveTools {
             "Internetrecherche. action ist news, search oder follow. news: Schlagzeilen, query optional. \
 search: Websuche, query nötig. follow: eine https-Seite lesen (url) oder bis zu drei auf einmal (urls). \
 Jede Seite endet mit Links samt Titel; interessanten Links folgst du wieder mit follow. \
-Mehrere Schritte sind erlaubt. Ab dem zweiten Schritt in notes festhalten, was die bisherigen \
-Ergebnisse zur Frage beitragen; ältere Ergebnisse werden danach durch diese Notizen ersetzt. Nicht für Geräte im Haus.",
+Mehrere Schritte sind erlaubt. Ab dem zweiten Schritt in kontext deinen neuen Kontext mit dem \
+bisher Gefundenen schreiben; ältere Ergebnisse fallen danach weg. Nicht für Geräte im Haus.",
             json!({
                 "type": "object",
                 "required": ["action"],
@@ -126,9 +126,9 @@ Ergebnisse zur Frage beitragen; ältere Ergebnisse werden danach durch diese Not
                         "maxItems": FOLLOW_MAX,
                         "description": "Mehrere https-Adressen für follow, höchstens drei."
                     },
-                    "notes": {
+                    "kontext": {
                         "type": "string",
-                        "description": "Was die bisherigen Ergebnisse zur Frage beitragen, knapp mit Zahlen und Quelle."
+                        "description": "Dein neuer Kontext: was weiter gilt und was du bisher gefunden hast."
                     }
                 }
             }),

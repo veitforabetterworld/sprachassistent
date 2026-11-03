@@ -62,16 +62,17 @@ const deviceSchema = z.object({
   speed: z.coerce.number().min(0.5).max(2).default(1),
   persona: z.string().max(8000).default(""),
   provider_id: uuid.nullable().default(null),
-  history_messages: z.coerce.number().int().min(0).max(100).default(12),
-  memory_extraction: z.boolean().default(true),
   max_iterations: z.coerce.number().int().min(1).max(20).default(6),
   busy_phrase: z.string().trim().min(1).max(200).default("Einen Moment."),
   still_busy_phrase: z.string().trim().min(1).max(200).default("Ich bin noch dran."),
   tools_enabled: z.boolean().default(true),
 });
 
-const DEVICE_COLUMNS = `id, name, voice, speed, persona, provider_id, history_messages, memory_extraction,
-  max_iterations, busy_phrase, still_busy_phrase, tools_enabled, created_at`;
+const DEVICE_COLUMNS = `id, name, voice, speed, persona, provider_id, max_iterations, busy_phrase,
+  still_busy_phrase, tools_enabled, created_at`;
+
+/** Same limit as CONTEXT_CHARS in src/context.rs. */
+const CONTEXT_CHARS = 500;
 
 function keyHint(key: string): string {
   return key.length > 8 ? `…${key.slice(-4)}` : "";
@@ -283,9 +284,9 @@ export function adminRouter(): Router {
       const d = parse(deviceSchema, req.body);
       const providerId = await ownedProvider(req, d.provider_id);
       const row = await pool.query(
-        `INSERT INTO devices (user_id, name, voice, speed, persona, provider_id, history_messages, memory_extraction,
+        `INSERT INTO devices (user_id, name, voice, speed, persona, provider_id,
             max_iterations, busy_phrase, still_busy_phrase, tools_enabled)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING ${DEVICE_COLUMNS}`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING ${DEVICE_COLUMNS}`,
         [
           await ownerId(req),
           d.name,
@@ -293,8 +294,6 @@ export function adminRouter(): Router {
           d.speed,
           d.persona,
           providerId,
-          d.history_messages,
-          d.memory_extraction,
           d.max_iterations,
           d.busy_phrase,
           d.still_busy_phrase,
@@ -311,9 +310,9 @@ export function adminRouter(): Router {
       const d = parse(deviceSchema, req.body);
       const providerId = await ownedProvider(req, d.provider_id);
       const row = await pool.query(
-        `UPDATE devices SET name = $2, voice = $3, speed = $4, persona = $5, provider_id = $6, history_messages = $7,
-           memory_extraction = $8, max_iterations = $9, busy_phrase = $10, still_busy_phrase = $11, tools_enabled = $12
-         WHERE id = $1 AND user_id = $13 RETURNING ${DEVICE_COLUMNS}`,
+        `UPDATE devices SET name = $2, voice = $3, speed = $4, persona = $5, provider_id = $6,
+           max_iterations = $7, busy_phrase = $8, still_busy_phrase = $9, tools_enabled = $10
+         WHERE id = $1 AND user_id = $11 RETURNING ${DEVICE_COLUMNS}`,
         [
           id,
           d.name,
@@ -321,8 +320,6 @@ export function adminRouter(): Router {
           d.speed,
           d.persona,
           providerId,
-          d.history_messages,
-          d.memory_extraction,
           d.max_iterations,
           d.busy_phrase,
           d.still_busy_phrase,
@@ -408,62 +405,31 @@ export function adminRouter(): Router {
     "/devices/:id/memory",
     handle(async (req, res) => {
       const id = await ownedDevice(req, parse(uuid, req.params.id));
-      const facts = await pool.query(
-        `SELECT id::text, content, origin, updated_at FROM device_facts WHERE device_id = $1 ORDER BY id`,
-        [id],
-      );
+      const device = await pool.query(`SELECT context FROM devices WHERE id = $1`, [id]);
       const messages = await pool.query(
         `SELECT id::text, role, content, metadata, created_at FROM device_messages WHERE device_id = $1 ORDER BY id DESC LIMIT 50`,
         [id],
       );
-      res.json({ facts: facts.rows, messages: messages.rows.reverse() });
+      res.json({ context: device.rows[0]?.context ?? "", messages: messages.rows.reverse() });
     }),
   );
   router.delete(
     "/devices/:id/memory",
     handle(async (req, res) => {
       const id = await ownedDevice(req, parse(uuid, req.params.id));
-      const what = parse(z.enum(["facts", "messages", "all"]).default("all"), req.query.what);
-      if (what !== "messages") await pool.query(`DELETE FROM device_facts WHERE device_id = $1`, [id]);
-      if (what !== "facts") await pool.query(`DELETE FROM device_messages WHERE device_id = $1`, [id]);
+      const what = parse(z.enum(["context", "messages", "all"]).default("all"), req.query.what);
+      if (what !== "messages") await pool.query(`UPDATE devices SET context = '' WHERE id = $1`, [id]);
+      if (what !== "context") await pool.query(`DELETE FROM device_messages WHERE device_id = $1`, [id]);
       res.status(204).end();
-    }),
-  );
-  router.post(
-    "/devices/:id/facts",
-    handle(async (req, res) => {
-      const row = await pool.query(
-        `INSERT INTO device_facts (device_id, content, origin) VALUES ($1, $2, 'user')
-         RETURNING id::text, content, origin, updated_at`,
-        [await ownedDevice(req, parse(uuid, req.params.id)), parse(z.string().trim().min(1).max(500), req.body?.content)],
-      );
-      res.status(201).json(row.rows[0]);
     }),
   );
   router.put(
-    "/devices/:id/facts/:factId",
+    "/devices/:id/context",
     handle(async (req, res) => {
-      const row = await pool.query(
-        `UPDATE device_facts SET content = $3, origin = 'user', updated_at = NOW() WHERE device_id = $1 AND id = $2
-         RETURNING id::text, content, origin, updated_at`,
-        [
-          await ownedDevice(req, parse(uuid, req.params.id)),
-          parse(z.coerce.number().int(), req.params.factId),
-          parse(z.string().trim().min(1).max(500), req.body?.content),
-        ],
-      );
-      if (!row.rows[0]) throw new HttpError(404, "Eintrag nicht gefunden");
-      res.json(row.rows[0]);
-    }),
-  );
-  router.delete(
-    "/devices/:id/facts/:factId",
-    handle(async (req, res) => {
-      await pool.query(`DELETE FROM device_facts WHERE device_id = $1 AND id = $2`, [
-        await ownedDevice(req, parse(uuid, req.params.id)),
-        parse(z.coerce.number().int(), req.params.factId),
-      ]);
-      res.status(204).end();
+      const id = await ownedDevice(req, parse(uuid, req.params.id));
+      const context = parse(z.string().trim().max(CONTEXT_CHARS), req.body?.context);
+      await pool.query(`UPDATE devices SET context = $2 WHERE id = $1`, [id, context]);
+      res.json({ context });
     }),
   );
 

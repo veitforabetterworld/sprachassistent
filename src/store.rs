@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -22,7 +22,7 @@ const SCHEMA_LOCK: i64 = 7_351_402;
 /// Same prefix as apps/api/src/accounts.ts. Every key is stored with this permission; callers do not choose one.
 const KEY_PREFIX: &str = "spa_";
 const DEVICE_TALK: &str = "device.talk";
-/// Older messages are deleted; what matters long-term ends up in the facts.
+/// Older messages are deleted; what matters long-term is in the device's context.
 const KEEP_MESSAGES: i64 = 1000;
 
 #[derive(Debug, Clone, FromRow, Serialize)]
@@ -34,19 +34,12 @@ pub struct Device {
     pub speed: f32,
     pub persona: String,
     pub provider_id: Option<Uuid>,
-    pub history_messages: i32,
-    pub memory_extraction: bool,
     pub max_iterations: i32,
     pub busy_phrase: String,
     pub still_busy_phrase: String,
     pub tools_enabled: bool,
-}
-
-#[derive(Debug, Clone, FromRow, Serialize, PartialEq)]
-pub struct Fact {
-    pub id: i64,
-    pub content: String,
-    pub origin: String,
+    /// What the model wrote down for later conversations, see `context`.
+    pub context: String,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -54,21 +47,6 @@ pub struct StoredMessage {
     pub role: String,
     pub content: String,
     pub metadata: Value,
-}
-
-/// Changes the model proposes after a conversation.
-#[derive(Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct FactChanges {
-    pub add: Vec<String>,
-    pub update: Vec<FactUpdate>,
-    pub delete: Vec<i64>,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-pub struct FactUpdate {
-    pub id: i64,
-    pub content: String,
 }
 
 #[derive(FromRow)]
@@ -81,8 +59,8 @@ struct ProviderRow {
 }
 
 const DEVICE_COLUMNS: &str =
-    "id, user_id, name, voice, speed, persona, provider_id, history_messages, \
-     memory_extraction, max_iterations, busy_phrase, still_busy_phrase, tools_enabled";
+    "id, user_id, name, voice, speed, persona, provider_id, max_iterations, busy_phrase, \
+     still_busy_phrase, tools_enabled, context";
 
 #[derive(Clone)]
 pub struct Store {
@@ -276,90 +254,28 @@ impl Store {
         Ok(())
     }
 
-    /// The last `limit` messages, oldest first.
-    pub async fn recent_messages(&self, device: Uuid, limit: i32) -> Result<Vec<StoredMessage>> {
+    /// The last question and the last reply, oldest first. Tool rows and empty tool-call
+    /// turns are left out; everything older lives on only in the context.
+    pub async fn last_exchange(&self, device: Uuid) -> Result<Vec<StoredMessage>> {
         Ok(sqlx::query_as(
             "SELECT role, content, metadata FROM
-               (SELECT id, role, content, metadata FROM device_messages WHERE device_id = $1 ORDER BY id DESC LIMIT $2) m
+               (SELECT id, role, content, metadata FROM device_messages
+                WHERE device_id = $1 AND role IN ('user', 'assistant') AND content <> ''
+                ORDER BY id DESC LIMIT 2) m
              ORDER BY id",
         )
         .bind(device)
-        .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?)
     }
 
-    pub async fn facts(&self, device: Uuid) -> Result<Vec<Fact>> {
-        Ok(sqlx::query_as(
-            "SELECT id, content, origin FROM device_facts WHERE device_id = $1 ORDER BY id",
-        )
-        .bind(device)
-        .fetch_all(&self.pool)
-        .await?)
-    }
-
-    pub async fn apply(&self, device: Uuid, changes: &FactChanges) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        for content in changes
-            .add
-            .iter()
-            .map(|c| c.trim())
-            .filter(|c| !c.is_empty())
-        {
-            sqlx::query("INSERT INTO device_facts (device_id, content) VALUES ($1, $2)")
-                .bind(device)
-                .bind(content)
-                .execute(&mut *tx)
-                .await?;
-        }
-        for u in &changes.update {
-            sqlx::query(
-                "UPDATE device_facts SET content = $3, updated_at = NOW() WHERE device_id = $1 AND id = $2",
-            )
+    pub async fn set_context(&self, device: Uuid, context: &str) -> Result<()> {
+        sqlx::query("UPDATE devices SET context = $2 WHERE id = $1")
             .bind(device)
-            .bind(u.id)
-            .bind(u.content.trim())
-            .execute(&mut *tx)
+            .bind(context)
+            .execute(&self.pool)
             .await?;
-        }
-        for id in &changes.delete {
-            sqlx::query("DELETE FROM device_facts WHERE device_id = $1 AND id = $2")
-                .bind(device)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        tx.commit().await?;
         Ok(())
-    }
-
-    /// The facts that go into a prompt: the 30 newest, plus older ones whose text matches the question.
-    pub async fn facts_for_prompt(&self, device: Uuid, user_text: &str) -> Result<Vec<Fact>> {
-        let mut facts: Vec<Fact> = sqlx::query_as(
-            "SELECT id, content, origin FROM device_facts
-             WHERE device_id = $1 ORDER BY updated_at DESC, id DESC LIMIT 30",
-        )
-        .bind(device)
-        .fetch_all(&self.pool)
-        .await?;
-        let words = prompt_words(user_text);
-        if words.is_empty() {
-            return Ok(facts);
-        }
-        let patterns: Vec<String> = words.iter().map(|w| format!("%{w}%")).collect();
-        let have: Vec<i64> = facts.iter().map(|f| f.id).collect();
-        let extra: Vec<Fact> = sqlx::query_as(
-            "SELECT id, content, origin FROM device_facts
-             WHERE device_id = $1 AND NOT (id = ANY($2)) AND content ILIKE ANY($3)
-             ORDER BY updated_at DESC LIMIT 10",
-        )
-        .bind(device)
-        .bind(&have)
-        .bind(&patterns)
-        .fetch_all(&self.pool)
-        .await?;
-        facts.extend(extra);
-        Ok(facts)
     }
 
     pub async fn insert_run(
@@ -582,20 +498,6 @@ impl Store {
         .await?;
         Ok(row)
     }
-}
-
-fn prompt_words(text: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    for raw in text.split(|c: char| !c.is_alphanumeric()) {
-        let word = raw.to_lowercase();
-        if word.chars().count() > 3 && !words.contains(&word) {
-            words.push(word);
-        }
-        if words.len() == 8 {
-            break;
-        }
-    }
-    words
 }
 
 #[derive(Debug, Clone, FromRow)]

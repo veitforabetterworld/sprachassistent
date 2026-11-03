@@ -45,7 +45,11 @@ impl ChatModel for FakeLlm {
     ) -> Result<TokenStream> {
         let names = providers.iter().map(|p| p.name.clone()).collect();
         self.seen.lock().unwrap().push((names, messages.to_vec()));
-        let tokens = ["Hallo Veit, schön dich ", "zu hören. Wie geht's?"];
+        let tokens = [
+            "Hallo Veit, schön dich ",
+            "zu hören. Wie geht's? [kon",
+            "text]Nutzer heißt Veit.[/kontext]",
+        ];
         Ok(Box::pin(futures_util::stream::iter(
             tokens.map(|t| Ok(t.to_string())),
         )))
@@ -229,8 +233,8 @@ impl Setup {
 
     async fn device(&self, user: i64, persona: &str) -> Uuid {
         let (id,): (Uuid,) = sqlx::query_as(
-            "INSERT INTO devices (name, voice, persona, memory_extraction, user_id)
-             VALUES ($1, $2, $3, false, $4) RETURNING id",
+            "INSERT INTO devices (name, voice, persona, user_id)
+             VALUES ($1, $2, $3, $4) RETURNING id",
         )
         .bind(format!("Test {}", Uuid::new_v4()))
         .bind(VOICE)
@@ -335,13 +339,16 @@ async fn talk_streams_speech_and_remembers_per_device() {
     let spoken = "Hallo Veit, schön dich zu hören.".chars().count() + "Wie geht's?".chars().count();
     assert_eq!(body.len(), spoken * 2);
 
-    let stored = s.store.recent_messages(a, 10).await.unwrap();
+    // The context block is neither spoken nor stored with the reply; it becomes the context.
+    let stored = s.store.last_exchange(a).await.unwrap();
     assert_eq!(stored.len(), 2);
     assert_eq!(
         stored[1].content,
         "Hallo Veit, schön dich zu hören. Wie geht's?"
     );
-    assert!(s.store.recent_messages(b, 10).await.unwrap().is_empty());
+    let device = s.store.device(a).await.unwrap().unwrap();
+    assert_eq!(device.context, "Nutzer heißt Veit.");
+    assert!(s.store.last_exchange(b).await.unwrap().is_empty());
     let seen = s.llm.seen.lock().unwrap();
     assert!(seen.last().unwrap().1[0].content.contains("Lautsprecher"));
 }
@@ -360,21 +367,22 @@ async fn silence_is_answered_without_asking_the_model() {
 }
 
 #[tokio::test]
-async fn prompt_has_the_device_persona_facts_history_and_provider_order() {
+async fn prompt_has_the_persona_context_last_exchange_and_provider_order() {
     let Some(s) = setup().await else { return };
     let owner = s.user(false).await;
     let device = s.device(owner, "Du bist Frieda, eine Piratin.").await;
     let other = s.device(s.user(false).await, "").await;
-    sqlx::query("INSERT INTO device_facts (device_id, content) VALUES ($1, 'Mag Kaffee'), ($2, 'Fremder Fakt')")
-        .bind(device)
-        .bind(other)
-        .execute(&s.pool)
-        .await
-        .unwrap();
-    s.store
-        .add_message(device, "user", "Vorher gesagt")
-        .await
-        .unwrap();
+    for (id, context) in [(device, "Mag Kaffee"), (other, "Fremder Kontext")] {
+        s.store.set_context(id, context).await.unwrap();
+    }
+    for (role, text) in [
+        ("user", "Ganz alt"),
+        ("assistant", "Alte Antwort"),
+        ("tool", "Werkzeug"),
+        ("user", "Vorher gesagt"),
+    ] {
+        s.store.add_message(device, role, text).await.unwrap();
+    }
     let (local,): (Uuid,) = sqlx::query_as(
         "INSERT INTO llm_providers (user_id, name, base_url, model, priority)
          VALUES ($1, $2, 'http://127.0.0.1:11434/v1', 'x', 999)
@@ -419,10 +427,15 @@ async fn prompt_has_the_device_persona_facts_history_and_provider_order() {
     assert!(!providers.iter().any(|name| name.starts_with("Fremd ")));
     let system = &messages[0].content;
     assert!(system.starts_with("Du bist Frieda, eine Piratin."));
-    assert!(system.contains("- Mag Kaffee"));
-    assert!(!system.contains("Fremder Fakt"));
-    assert_eq!(messages[1].content, "Vorher gesagt");
-    assert_eq!(messages.last().unwrap().content, "Hallo");
+    assert!(!system.contains("Mag Kaffee"));
+    assert!(messages.iter().all(|m| !m.content.contains("Fremder")));
+    assert!(messages.iter().all(|m| !m.content.contains("Ganz alt")));
+    assert_eq!(messages[1].content, "Alte Antwort");
+    assert_eq!(messages[2].content, "Vorher gesagt");
+    assert_eq!(
+        messages.last().unwrap().content,
+        "[kontext]\nMag Kaffee\n[/kontext]\n\nHallo"
+    );
     assert!(!system.contains("Lautsprecher"));
 }
 
@@ -445,35 +458,6 @@ async fn internal_routes_are_not_reachable_through_nginx() {
     assert!(String::from_utf8(body)
         .unwrap()
         .contains("test (de_DE, medium)"));
-}
-
-#[tokio::test]
-async fn extracted_facts_are_stored_for_the_device() {
-    let Some(s) = setup().await else { return };
-    let id = s.device(s.user(false).await, "").await;
-    let device = s.store.device(id).await.unwrap().unwrap();
-    sqlx::query(
-        "INSERT INTO device_facts (device_id, content, origin) VALUES ($1, 'Mag Tee', 'user')",
-    )
-    .bind(id)
-    .execute(&s.pool)
-    .await
-    .unwrap();
-    let llm: Arc<dyn ChatModel> = s.llm.clone();
-    sprachassistent::assistant::extract_facts(
-        &llm,
-        &s.store,
-        &device,
-        "Ich heiße Veit",
-        "Freut mich",
-    )
-    .await
-    .unwrap();
-    let facts = s.store.facts(id).await.unwrap();
-    assert!(facts.iter().any(|f| f.content == "Heißt Veit"));
-    assert!(facts
-        .iter()
-        .any(|f| f.content == "Mag Tee" && f.origin == "user"));
 }
 
 fn tool_turn(call: bool, text: &str) -> ModelTurn {
@@ -632,7 +616,7 @@ async fn asking_again_for_the_same_research_ends_in_an_answer() {
 }
 
 #[tokio::test]
-async fn older_pages_leave_the_prompt_once_the_model_wrote_notes() {
+async fn older_pages_leave_the_prompt_once_the_model_wrote_its_context() {
     let Some((s, tools, device, _)) = named_tool_setup("web_research", Effect::Auto).await else {
         return;
     };
@@ -641,7 +625,7 @@ async fn older_pages_leave_the_prompt_once_the_model_wrote_notes() {
         tool_calls: vec![ToolCall {
             id: "r2".into(),
             name: "web_research".into(),
-            arguments: r#"{"action":"search","query":"Wahl","notes":"Wahl am Sonntag"}"#.into(),
+            arguments: r#"{"action":"search","query":"Wahl","kontext":"Wahl am Sonntag"}"#.into(),
             thought_signature: None,
         }],
         ..ModelTurn::default()
@@ -650,6 +634,9 @@ async fn older_pages_leave_the_prompt_once_the_model_wrote_notes() {
     let reply = chat(&s, device, "Wann ist die Wahl?").await;
     assert_eq!(reply["reply"], "Die Wahl ist am Sonntag.");
     assert_eq!(*tools.calls.lock().unwrap(), 2);
+    // The reply brought no block, so the context from the research step is kept.
+    let stored = s.store.device(device).await.unwrap().unwrap();
+    assert_eq!(stored.context, "Wahl am Sonntag");
     let seen = s.llm.seen.lock().unwrap();
     let result = |messages: &[ChatMessage], id: &str| {
         messages
@@ -662,12 +649,39 @@ async fn older_pages_leave_the_prompt_once_the_model_wrote_notes() {
     assert!(result(&seen[1].1, "r1").contains("pong"));
     let third = &seen[2].1;
     assert!(!result(third, "r1").contains("pong"));
-    assert!(result(third, "r1").contains("Notizen"));
+    assert!(result(third, "r1").contains("Kontext"));
     assert!(result(third, "r2").contains("pong"));
     assert!(third.iter().any(|m| m
         .tool_calls
         .iter()
         .any(|c| c.arguments.contains("Wahl am Sonntag"))));
+}
+
+#[tokio::test]
+async fn a_reply_with_tools_keeps_its_block_as_context_and_out_of_the_reply() {
+    let Some((s, _, device, _)) = named_tool_setup("web_research", Effect::Auto).await else {
+        return;
+    };
+    s.store.set_context(device, "Alt").await.unwrap();
+    s.llm.push(tool_turn(
+        false,
+        "Hallo Veit!\n[kontext]Heißt Veit.[/kontext]",
+    ));
+    let reply = chat(&s, device, "Ich bin Veit").await;
+    assert_eq!(reply["reply"], "Hallo Veit!");
+    let last = s.store.last_exchange(device).await.unwrap();
+    assert_eq!(last[1].content, "Hallo Veit!");
+    assert_eq!(
+        s.store.device(device).await.unwrap().unwrap().context,
+        "Heißt Veit."
+    );
+    let seen = s.llm.seen.lock().unwrap();
+    assert!(seen[0]
+        .1
+        .last()
+        .unwrap()
+        .content
+        .starts_with("[kontext]\nAlt\n"));
 }
 
 #[tokio::test]
@@ -817,34 +831,4 @@ async fn a_run_stays_on_the_provider_that_answered() {
     // The one that answered goes first; the others stay behind it for a limit or an outage.
     assert_eq!(seen[1].0[0], first[0]);
     assert_eq!(seen[1].0.len(), first.len());
-}
-
-#[tokio::test]
-async fn prompt_keeps_recent_facts_and_keyword_matches() {
-    let Some(s) = setup().await else { return };
-    let device = s.device(s.user(false).await, "").await;
-    sqlx::query(
-        "INSERT INTO device_facts (device_id, content, updated_at)
-         VALUES ($1, 'Handwerker Heinz', NOW() - INTERVAL '10 days')",
-    )
-    .bind(device)
-    .execute(&s.pool)
-    .await
-    .unwrap();
-    for i in 0..30 {
-        sqlx::query("INSERT INTO device_facts (device_id, content) VALUES ($1, $2)")
-            .bind(device)
-            .bind(format!("Neuer Fakt {i}"))
-            .execute(&s.pool)
-            .await
-            .unwrap();
-    }
-    let facts = s
-        .store
-        .facts_for_prompt(device, "wie heißt der Handwerker")
-        .await
-        .unwrap();
-    assert!(facts.len() <= 40);
-    assert!(facts.iter().any(|f| f.content == "Handwerker Heinz"));
-    assert!(facts.iter().any(|f| f.content == "Neuer Fakt 29"));
 }

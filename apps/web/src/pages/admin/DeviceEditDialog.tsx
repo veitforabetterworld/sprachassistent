@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronRight } from "lucide-react";
-import { VEIT_SETTINGS_ACTIONS, VeitButton, VeitDeleteButton, VeitEmptyState, VeitField, VeitInput, VeitList, VeitListItem, VeitSelect, VeitSettingsToggleRow, VeitTextarea } from "@veit/react-controls";
+import { VEIT_SETTINGS_ACTIONS, VeitButton, VeitDeleteButton, VeitField, VeitInput, VeitSelect, VeitSettingsToggleRow, VeitTextarea } from "@veit/react-controls";
 import { VeitOverlayEditDialog, useDialogFormBaseline, useManagedOverlayDialogBinding } from "@veit/react-dialog";
-import { adminApi, errorText, type Device, type DeviceInput, type Fact, type Voice } from "../../api";
+import { adminApi, errorText, type Device, type DeviceInput, type Voice } from "../../api";
 import { useI18n } from "../../i18n/I18nProvider";
 
 const DEFAULT_VOICE = "vits-piper-de_DE-thorsten-medium"; // i18n-ignore: voice id
 const DEFAULT_PROVIDER = "default";
+/** Same limit as CONTEXT_CHARS in src/context.rs. */
+const CONTEXT_CHARS = 500;
 
 /** Text fields are edited as strings and converted on save. */
-type Draft = Omit<DeviceInput, "speed" | "history_messages" | "max_iterations"> & {
+type Draft = Omit<DeviceInput, "speed" | "max_iterations"> & {
   speed: string;
-  history_messages: string;
   max_iterations: string;
 };
 
@@ -19,7 +19,6 @@ function toDraft(d: DeviceInput): Draft {
   return {
     ...d,
     speed: String(d.speed),
-    history_messages: String(d.history_messages),
     max_iterations: String(d.max_iterations),
   };
 }
@@ -49,8 +48,6 @@ export function DeviceEditDialog({ open, device, voices, providers, onClose, onS
           speed: 1,
           persona: t("newDevicePersona"),
           provider_id: null,
-          history_messages: 12,
-          memory_extraction: true,
           max_iterations: 6,
           busy_phrase: t("defaultBusyPhrase"),
           still_busy_phrase: t("defaultStillBusyPhrase"),
@@ -78,7 +75,6 @@ export function DeviceEditDialog({ open, device, voices, providers, onClose, onS
     const input: DeviceInput = {
       ...draft,
       speed: Number(draft.speed.replace(",", ".")) || 1,
-      history_messages: Number(draft.history_messages) || 0,
       max_iterations: Number(draft.max_iterations) || 6,
     };
     setSaving(true);
@@ -157,23 +153,6 @@ export function DeviceEditDialog({ open, device, voices, providers, onClose, onS
             ]}
           />
         </VeitField>
-        <VeitField label={t("historyMessages")} htmlFor="device-history">
-          <VeitInput
-            id="device-history"
-            inputMode="numeric"
-            value={draft.history_messages}
-            disabled={saving}
-            onChange={(e) => set("history_messages", e.target.value)}
-          />
-        </VeitField>
-        <VeitSettingsToggleRow
-          variant="embed"
-          label={t("memoryExtraction")}
-          description={t("memoryExtractionHint")}
-          checked={draft.memory_extraction}
-          disabled={saving}
-          onCheckedChange={(v) => set("memory_extraction", v)}
-        />
         <VeitField label={t("maxIterations")} htmlFor="device-iterations" hint={t("maxIterationsHint")}>
           <VeitInput
             id="device-iterations"
@@ -197,35 +176,33 @@ export function DeviceEditDialog({ open, device, voices, providers, onClose, onS
           disabled={saving}
           onCheckedChange={(v) => set("tools_enabled", v)}
         />
-        {device && <FactsEditor deviceId={device.id} onHistoryCleared={onHistoryCleared} />}
+        {device && open && <ContextEditor deviceId={device.id} onHistoryCleared={onHistoryCleared} />}
       </div>
     </VeitOverlayEditDialog>
   );
 }
 
-/** Facts live with the chatbot settings. Saving one does not touch the rest of the form. */
-function FactsEditor({ deviceId, onHistoryCleared }: { deviceId: string; onHistoryCleared?: () => void }) {
-  const { t } = useI18n();
-  const [facts, setFacts] = useState<Fact[]>([]);
-  const [selected, setSelected] = useState<Fact | null>(null);
-  const [content, setContent] = useState("");
+/** The context lives with the chatbot settings. Saving it does not touch the rest of the form. */
+function ContextEditor({ deviceId, onHistoryCleared }: { deviceId: string; onHistoryCleared?: () => void }) {
+  const { t, tf } = useI18n();
+  const [saved, setSaved] = useState("");
+  const [context, setContext] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const reload = useCallback(() => {
-    void adminApi.memory(deviceId).then((memory) => setFacts(memory.facts));
+    void adminApi.memory(deviceId).then((memory) => {
+      setSaved(memory.context);
+      setContext(memory.context);
+    });
   }, [deviceId]);
   useEffect(reload, [reload]);
 
   const save = async () => {
-    const text = content.trim();
-    if (!text) return;
     setError(null);
     try {
-      if (selected) await adminApi.updateFact(deviceId, selected.id, text);
-      else await adminApi.addFact(deviceId, text);
-      setSelected(null);
-      setContent("");
-      reload();
+      const result = await adminApi.setContext(deviceId, context);
+      setSaved(result.context);
+      setContext(result.context);
     } catch (e) {
       setError(errorText(e));
     }
@@ -241,60 +218,27 @@ function FactsEditor({ deviceId, onHistoryCleared }: { deviceId: string; onHisto
 
   return (
     <div className="flex flex-col gap-3 border-t border-border pt-4">
-      <div>
-        <p className="m-0 text-sm font-medium">{t("factsTitle")}</p>
-        <p className="m-0 text-sm text-muted-foreground">{t("factsHint")}</p>
-      </div>
-      {facts.length === 0 ? (
-        <VeitEmptyState embedded title={t("noFacts")} />
-      ) : (
-        <VeitList>
-          {facts.map((fact) => (
-            <VeitListItem
-              key={fact.id}
-              title={fact.content}
-              meta={fact.origin === "user" ? t("factOriginUser") : undefined}
-              trailing={<ChevronRight className="size-4 text-muted-foreground" aria-hidden />}
-              onClick={() => {
-                setSelected(fact);
-                setContent(fact.content);
-              }}
-            />
-          ))}
-        </VeitList>
-      )}
-      <VeitField label={selected ? t("factEdit") : t("factAdd")} htmlFor="fact-content" hint={t("factHint")}>
-        <VeitInput id="fact-content" value={content} onChange={(e) => setContent(e.target.value)} />
+      <VeitField
+        label={t("contextTitle")}
+        htmlFor="device-context"
+        hint={`${tf("contextHint", { max: CONTEXT_CHARS })} ${tf("contextCount", { count: context.length, max: CONTEXT_CHARS })}`}
+      >
+        <VeitTextarea id="device-context" rows={5} maxLength={CONTEXT_CHARS} value={context} onChange={(e) => setContext(e.target.value)} />
       </VeitField>
       {error && <p className="m-0 text-sm text-destructive">{error}</p>}
       <div className={VEIT_SETTINGS_ACTIONS}>
-        <VeitButton type="button" disabled={!content.trim()} onClick={() => void save()}>
-          {selected ? t("save") : t("add")}
+        <VeitButton type="button" disabled={context === saved} onClick={() => void save()}>
+          {t("saveContext")}
         </VeitButton>
-        {selected && (
+        {saved && (
           <VeitDeleteButton
-            deleteConfirm={{ ...confirm(t("factDeleteTitle")), message: selected.content }}
+            deleteConfirm={confirm(t("clearContextTitle"))}
             onClick={async () => {
-              await adminApi.deleteFact(deviceId, selected.id);
-              setSelected(null);
-              setContent("");
+              await adminApi.clearMemory(deviceId, "context");
               reload();
             }}
           >
-            {t("factDelete")}
-          </VeitDeleteButton>
-        )}
-        {facts.length > 0 && (
-          <VeitDeleteButton
-            deleteConfirm={confirm(t("clearFactsTitle"))}
-            onClick={async () => {
-              await adminApi.clearMemory(deviceId, "facts");
-              setSelected(null);
-              setContent("");
-              reload();
-            }}
-          >
-            {t("clearFacts")}
+            {t("clearContext")}
           </VeitDeleteButton>
         )}
         <VeitDeleteButton

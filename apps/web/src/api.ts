@@ -31,8 +31,6 @@ export type Device = {
   speed: number;
   persona: string;
   provider_id: string | null;
-  history_messages: number;
-  memory_extraction: boolean;
   max_iterations: number;
   busy_phrase: string;
   still_busy_phrase: string;
@@ -56,7 +54,6 @@ export type ProviderInput = Omit<Provider, "id" | "api_key_set" | "api_key_hint"
 export type ProviderDraft = Pick<ProviderInput, "name" | "base_url" | "model" | "api_key"> & { id: string | null };
 
 export type Voice = { id: string; label: string };
-export type Fact = { id: string; content: string; origin: string; updated_at: string };
 export type ToolCallMeta = { id?: string; name?: string; arguments?: string };
 export type Message = {
   id: string;
@@ -179,11 +176,9 @@ export const adminApi = {
   updateNativeTool: (name: string, body: { enabled: boolean; effect: ToolEffect }) =>
     admin<NativeTool>(`/tools/native/${name}`, "PUT", body),
 
-  memory: (id: string) => admin<{ facts: Fact[]; messages: Message[] }>(`/devices/${id}/memory`),
-  clearMemory: (id: string, what: "facts" | "messages" | "all") => admin<null>(`/devices/${id}/memory?what=${what}`, "DELETE"),
-  addFact: (id: string, content: string) => admin<Fact>(`/devices/${id}/facts`, "POST", { content }),
-  updateFact: (id: string, factId: string, content: string) => admin<Fact>(`/devices/${id}/facts/${factId}`, "PUT", { content }),
-  deleteFact: (id: string, factId: string) => admin<null>(`/devices/${id}/facts/${factId}`, "DELETE"),
+  memory: (id: string) => admin<{ context: string; messages: Message[] }>(`/devices/${id}/memory`),
+  clearMemory: (id: string, what: "context" | "messages" | "all") => admin<null>(`/devices/${id}/memory?what=${what}`, "DELETE"),
+  setContext: (id: string, context: string) => admin<{ context: string }>(`/devices/${id}/context`, "PUT", { context }),
   deleteMessage: (id: string, messageId: string) => admin<null>(`/devices/${id}/messages/${messageId}`, "DELETE"),
 };
 

@@ -9,8 +9,9 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::assistant::{self, NO_ANSWER};
+use crate::assistant::{self, ToolRules, NO_ANSWER};
 use crate::authz::{approval_word, frame_tool_result, truncate, validate_args, Approval, Effect};
+use crate::context::{self, ReplyCut};
 use crate::llm::{model_tool_names, ChatMessage, ChatModel, ToolCall, ToolDef, ALL_AT_LIMIT};
 use crate::runs::{RunGuard, CANCELLED, COMPLETED, FAILED, WAITING};
 use crate::secrets::Secrets;
@@ -96,8 +97,9 @@ pub async fn run(
 
     let offers = tools.list(user_id).await.unwrap_or_default();
     let use_tools = device.tools_enabled && !offers.is_empty();
-    let mut messages = prompt(&store, &device, channel, &offers, &user_text).await;
+    let mut messages = prompt(&store, &device, channel, &offers).await;
     messages.push(ChatMessage::new("user", user_text.clone()));
+    context::attach(&mut messages, &device.context);
 
     if !use_tools {
         return stream_reply(
@@ -132,28 +134,36 @@ async fn prompt(
     device: &Device,
     channel: Channel,
     offers: &[ToolOffer],
-    user_text: &str,
 ) -> Vec<ChatMessage> {
-    let facts = store
-        .facts_for_prompt(device.id, user_text)
-        .await
-        .unwrap_or_default();
+    let rules = (device.tools_enabled && !offers.is_empty()).then(|| ToolRules {
+        home: offers
+            .iter()
+            .any(|offer| tool_kind(&offer.name) != ToolKind::Research),
+        research: offers
+            .iter()
+            .any(|offer| tool_kind(&offer.name) == ToolKind::Research),
+    });
     let mut messages = vec![ChatMessage::new(
         "system",
-        assistant::system_prompt(
-            device,
-            &facts,
-            channel,
-            !offers.is_empty() && device.tools_enabled,
-        ),
+        assistant::system_prompt(device, channel, rules),
     )];
-    if let Ok(history) = store
-        .recent_messages(device.id, device.history_messages)
-        .await
-    {
+    // Everything older than the last exchange lives on only in the context.
+    if let Ok(history) = store.last_exchange(device.id).await {
         messages.extend(trim_history(history));
     }
     messages
+}
+
+/// Keeps the context the model wrote, unless it wrote none or the same again.
+async fn remember(store: &Store, device: &Device, new: Option<String>) {
+    let Some(new) = new else {
+        return;
+    };
+    if new != device.context {
+        if let Err(e) = store.set_context(device.id, &new).await {
+            tracing::warn!("Kontext nicht gespeichert: {e:#}");
+        }
+    }
 }
 
 fn trim_history(history: Vec<StoredMessage>) -> Vec<ChatMessage> {
@@ -191,18 +201,18 @@ async fn stream_reply(
         }
     };
     let started = Instant::now();
-    let mut full = String::new();
+    let mut cut = ReplyCut::default();
     match llm.stream(&providers, &messages).await {
         Ok(mut tokens) => {
             let mut splitter = SentenceSplitter::default();
             while let Some(token) = tokens.next().await {
                 match token {
                     Ok(piece) => {
-                        full.push_str(&piece);
+                        let speakable = cut.push(&piece);
                         if let Some(tx) = &say {
-                            for sentence in splitter.push(&piece) {
+                            for sentence in splitter.push(&speakable) {
                                 if tx.send(sentence).await.is_err() {
-                                    let reply = full.trim().to_string();
+                                    let reply = context::split(cut.full()).0;
                                     guard
                                         .finish(CANCELLED, &reply, "abgebrochen", 1, 0, 0, None)
                                         .await;
@@ -218,6 +228,10 @@ async fn stream_reply(
                 }
             }
             if let Some(tx) = &say {
+                let rest = cut.finish();
+                for sentence in splitter.push(&rest) {
+                    let _ = tx.send(sentence).await;
+                }
                 if let Some(rest) = splitter.finish() {
                     let _ = tx.send(rest).await;
                 }
@@ -231,7 +245,8 @@ async fn stream_reply(
             return fail(&say, &mut guard, &reply).await;
         }
     }
-    let reply = full.trim().to_string();
+    let (reply, new_context) = context::split(cut.full());
+    remember(&store, &device, new_context).await;
     if reply.is_empty() {
         let _ = store.add_message(device.id, "user", user_text).await;
         let _ = store.add_message(device.id, "assistant", NO_ANSWER).await;
@@ -250,7 +265,6 @@ async fn stream_reply(
         )
         .await;
     guard.finish(COMPLETED, &reply, "", 1, 0, 0, None).await;
-    spawn_extract(&llm, &store, &device, user_text, &reply);
     tracing::info!("{}: {}", device.name, reply);
     done(Some(guard.id()), &reply, COMPLETED)
 }
@@ -270,7 +284,8 @@ async fn resume(
     word: Approval,
 ) -> TurnResult {
     let offers = tools.list(user_id).await.unwrap_or_default();
-    let mut messages = prompt(&store, &device, channel, &offers, "").await;
+    let mut messages = prompt(&store, &device, channel, &offers).await;
+    context::attach(&mut messages, &device.context);
     let calls = pending_calls(&pending.pending_tools);
     let results = if word == Approval::Yes {
         execute(
@@ -408,15 +423,18 @@ async fn drive(
     let mut research_steps = 0usize;
     let mut researched = std::collections::HashSet::new();
     let mut research_results: Vec<(usize, String, String)> = Vec::new();
+    // The context a research step wrote, kept when the final reply brings none.
+    let mut research_context: Option<String> = None;
     loop {
         if started.elapsed() > budget || iterations >= limit {
             return fail(&say, &mut guard, TOO_LONG).await;
         }
         iterations += 1;
-        // After a tool result the old chat stays out. Actions stay available until one
-        // has run, so a state lookup can be followed by the actual device call.
+        // After a tool result the old chat stays out; the context in front of the question
+        // stays. Actions stay available until one has run, so a state lookup can be followed
+        // by the actual device call.
         let short;
-        let sent = if phase == PromptPhase::Lookup {
+        let sent = if phase == PromptPhase::Lookup && !gathered {
             messages.as_slice()
         } else {
             short = search_follow_up(&messages);
@@ -520,7 +538,9 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
             continue;
         }
         if turn.tool_calls.is_empty() {
-            let reply = spoken_reply(turn.content.trim());
+            let (answer, new_context) = context::split(&turn.content);
+            remember(&store, &device, new_context.or(research_context.take())).await;
+            let reply = spoken_reply(&answer);
             if reply.is_empty() {
                 return fail(&say, &mut guard, NO_ANSWER).await;
             }
@@ -553,7 +573,6 @@ Wenn aktuelle Daten oder eine Änderung nötig sind, rufe jetzt ein angebotenes 
                     None,
                 )
                 .await;
-            spawn_extract(&llm, &store, &device, user_text, &reply);
             tracing::info!("{}: {}", device.name, reply);
             return done(Some(guard.id()), &reply, COMPLETED);
         }
@@ -709,12 +728,15 @@ Erst nach dem neuen Lese-Ergebnis einzeln aufrufen, falls es noch nötig ist."
             let _ = store.add_message(device.id, "user", user_text).await;
             user_saved = true;
         }
-        // A new research step carries the model's notes on what it read so far. The pages
-        // themselves then leave the prompt; only the newest result is sent in full.
+        // A new research step carries the model's new context with what it read so far. The
+        // pages themselves then leave the prompt; only the newest result is sent in full.
         if research_now > 0 {
-            let notes = research_notes(&calls);
+            let written = research_context_of(&calls);
             for (at, label, start) in research_results.drain(..) {
-                messages[at].content = compact_research(&label, &start, &notes);
+                messages[at].content = compact_research(&label, &start, written.is_some());
+            }
+            if written.is_some() {
+                research_context = written;
             }
         }
         messages.push(ChatMessage {
@@ -992,44 +1014,44 @@ fn recover_text_tool_call(content: &str, defs: &[ToolDef]) -> Option<ToolCall> {
 }
 
 const ALREADY_READ: &str =
-    "Schon gelesen, was davon zählt, steht oben oder in deinen Notizen. Nimm einen anderen Link oder antworte.";
+    "Schon gelesen, was davon zählt, steht oben oder in deinem Kontext. Nimm einen anderen Link oder antworte.";
 
 /// What is left of an older research result when the model has moved on.
 const OLD_RESULT_CHARS: usize = 400;
 
 /// Arguments of a research call with the order of keys and spacing evened out.
-/// The notes change with every step and do not make a different request.
+/// The context changes with every step and does not make a different request.
 fn research_key(arguments: &str) -> String {
     serde_json::from_str::<Value>(arguments)
         .map(|mut args| {
             if let Some(map) = args.as_object_mut() {
-                map.remove("notes");
+                map.remove("kontext");
             }
             args.to_string()
         })
         .unwrap_or_else(|_| arguments.trim().to_string())
 }
 
-/// The notes the model wrote into this turn's research calls.
-fn research_notes(calls: &[ToolCall]) -> String {
-    calls
+/// The context the model wrote into this turn's research calls, cut to the limit.
+fn research_context_of(calls: &[ToolCall]) -> Option<String> {
+    let written = calls
         .iter()
         .filter(|call| tool_kind(&call.name) == ToolKind::Research)
         .filter_map(|call| serde_json::from_str::<Value>(&call.arguments).ok())
-        .filter_map(|args| args.get("notes")?.as_str().map(|s| s.trim().to_string()))
-        .filter(|notes| !notes.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+        .filter_map(|args| args.get("kontext")?.as_str().map(|s| s.trim().to_string()))
+        .rfind(|written| !written.is_empty())?;
+    Some(written.chars().take(context::CONTEXT_CHARS).collect())
 }
 
-/// An older research result reduced to the model's notes, or to its start when there are none.
-fn compact_research(label: &str, start: &str, notes: &str) -> String {
-    if notes.is_empty() {
+/// An older research result reduced to a pointer to the new context, or to its start when
+/// the model wrote none.
+fn compact_research(label: &str, start: &str, context_written: bool) -> String {
+    if !context_written {
         return frame_tool_result(label, &format!("Älteres Ergebnis, gekürzt:\n{start}"));
     }
     frame_tool_result(
         label,
-        "Älteres Ergebnis, ersetzt durch deine Notizen im nächsten Aufruf.",
+        "Älteres Ergebnis, ersetzt durch deinen Kontext im nächsten Aufruf.",
     )
 }
 
@@ -1056,28 +1078,6 @@ fn search_follow_up(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     out.extend(tail);
     out.extend(later_systems);
     out
-}
-
-fn spawn_extract(
-    llm: &Arc<dyn ChatModel>,
-    store: &Store,
-    device: &Device,
-    user_text: &str,
-    reply: &str,
-) {
-    if !device.memory_extraction || user_text.is_empty() {
-        return;
-    }
-    let llm = Arc::clone(llm);
-    let store = store.clone();
-    let device = device.clone();
-    let user_text = user_text.to_string();
-    let reply = reply.to_string();
-    tokio::spawn(async move {
-        if let Err(e) = assistant::extract_facts(&llm, &store, &device, &user_text, &reply).await {
-            tracing::warn!("Fakten nicht aktualisiert: {e:#}");
-        }
-    });
 }
 
 #[cfg(test)]
@@ -1186,7 +1186,7 @@ mod tests {
         assert_eq!(first, again);
         assert_ne!(first, other);
         let with_notes =
-            research_key(r#"{"action":"follow","url":"https://a.de/x","notes":"neu"}"#);
+            research_key(r#"{"action":"follow","url":"https://a.de/x","kontext":"neu"}"#);
         assert_eq!(first, with_notes);
     }
 }

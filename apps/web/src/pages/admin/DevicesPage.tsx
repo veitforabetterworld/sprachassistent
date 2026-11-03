@@ -30,7 +30,7 @@ function DeviceSummary({ device, voices, providers, onClick }: { device: Device;
         title={device.name}
         meta={
           <div className="flex flex-col gap-1">
-            <span>{tf("deviceSummary", { voice, speed: device.speed, provider, memory: device.memory_extraction ? t("on") : t("off") })}</span>
+            <span>{tf("deviceSummary", { voice, speed: device.speed, provider })}</span>
             <span className="line-clamp-2">{device.persona || t("noPersona")}</span>
           </div>
         }

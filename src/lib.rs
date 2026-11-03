@@ -5,6 +5,7 @@ pub mod audio;
 pub mod authz;
 pub mod browser;
 pub mod config;
+pub mod context;
 pub mod llm;
 pub mod mcp;
 pub mod page;

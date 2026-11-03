@@ -25,7 +25,8 @@ Nur Text verlässt das Heimnetz. Laufende Kosten: Strom für den Pi und die Grat
 src/                 Rust-Sprachserver
   api.rs             /v1/talk, /v1/health und interne Routen für den Adminbereich
   store.rs           Postgres: Geräte, Gedächtnis, Anbieter, ESP-Schlüssel prüfen
-  assistant.rs       Prompt, Persönlichkeit, Fakten-Extraktion je Gerät
+  assistant.rs       Prompt und Persönlichkeit je Gerät, Regeln nur für angebotene Werkzeuge
+  context.rs         Gedächtnis: Kontext (500 Zeichen), den das Modell nach der Antwort selbst neu schreibt
   speech.rs          Whisper (Feature whisper) und Piper-Stimmen (Feature piper)
   llm.rs             OpenAI-kompatible Anbieter mit Fallback, Streaming
   tools.rs           Werkzeuge: Internetrecherche über selbstgehostetes SearXNG, MCP-Werkzeuge
@@ -48,7 +49,7 @@ In `.env` steht nur `DATABASE_URL` (Vorlage `.env.example`). Alles andere liegt 
 
 | Tab | Inhalt |
 |---|---|
-| Geräte | Name, Stimme, Sprechtempo, Persönlichkeit, bevorzugter KI-Anbieter, Verlaufslänge, automatisches Gedächtnis; Testchat und Vorlesen; Fakten und Verlauf ansehen, ergänzen, löschen |
+| Geräte | Name, Stimme, Sprechtempo, Persönlichkeit, bevorzugter KI-Anbieter; Testchat und Vorlesen; Kontext ansehen, bearbeiten, löschen; Verlauf ansehen und löschen |
 | ESP-Schlüssel | API-Keys von `@veit/api-keys` mit der Berechtigung `device.talk`, beschränkt auf Geräte |
 | KI-Anbieter | OpenAI-kompatible Endpunkte (Groq, Gemini, OpenRouter, Ollama …) mit Key, Modell, Reihenfolge; Test-Button |
 | Einstellungen | Registrierung, SMTP, Whisper-Modell und Threads |
