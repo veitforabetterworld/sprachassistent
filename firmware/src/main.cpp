@@ -1,8 +1,11 @@
 // Sprachassistent-Client: Taster halten und sprechen, loslassen, Antwort hoeren.
 //
 // Waehrend der Taster gedrueckt ist, wird das Mikrofon als 16 kHz / 16 Bit mono an POST /v1/talk
-// gestreamt (chunked). Der Server antwortet mit rohem PCM (16 Bit mono, Rate im Header
-// X-Sample-Rate), das direkt ueber den MAX98357A abgespielt wird.
+// gestreamt (chunked). Der Server antwortet in Rahmen: 1 Byte Art, 4 Byte Laenge (little endian),
+// dann der Inhalt. Art 1 ist Audio (16 Bit mono, Rate im Header X-Sample-Rate) und wird direkt
+// ueber den MAX98357A abgespielt; Art 2 ist ein Status (thinking, tool:<Name>, speaking), den die
+// LED zeigt, bis der Assistent spricht. Was ein Werkzeug tut, weiss der ESP nicht: jeder Chatbot hat
+// andere; der Name steht nur im seriellen Protokoll.
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -22,7 +25,11 @@ constexpr int AMP_LRC = 25;
 constexpr int AMP_DIN = 27;
 // Taster gegen GND (rechte Stiftleiste). GPIO 5 ist ein Strapping-Pin: beim Einschalten nicht drücken.
 constexpr int BUTTON = 5;
+// Freenove ESP32-WROOM: einfarbige LED an GPIO 2. Optional eine WS2812 (RGB) an einem freien Pin,
+// z. B. 4; -1 = keine.
 constexpr int LED = 2;
+constexpr int RGB_LED_PIN = -1;
+constexpr int RGB_LEVEL = 80;  // 0..255
 
 constexpr i2s_port_t MIC_PORT = I2S_NUM_0;
 constexpr i2s_port_t AMP_PORT = I2S_NUM_1;
@@ -33,7 +40,7 @@ constexpr int MIC_SHIFT = 14;
 constexpr int VOLUME_PERCENT = 250;
 constexpr uint32_t MAX_RECORD_MS = 20000;
 // Puffert ca. 1,5 s Audio, waehrend die Verbindung (TLS-Handshake) aufgebaut wird.
-constexpr size_t AUDIO_BUFFER_BYTES = 96 * 1024;
+constexpr size_t AUDIO_BUFFER_BYTES = 64 * 1024;
 
 static StreamBufferHandle_t audioBuffer;
 static volatile bool recording = false;
@@ -46,6 +53,71 @@ static WiFiClientSecure client;
 #else
 static WiFiClient client;
 #endif
+
+// ---------- LED ----------
+// Aufnahme: an (RGB rot). KI denkt: pulsiert langsam (blau). Ein Werkzeug laeuft: pulsiert schnell
+// (tuerkis). Sprache wird erzeugt: flackert (violett). WLAN-Suche: blinkt (gelb). Waehrend der
+// Assistent spricht und sonst: aus.
+
+enum class LedState { Off, On, Recording, Thinking, Tool, Speaking, Connecting };
+
+// Sanftes Pulsieren mit der Periode `periodMs`, Helligkeit 15..255.
+static uint8_t pulse(uint32_t periodMs) {
+  float phase = (millis() % periodMs) / (float)periodMs;
+  return 15 + 240 * (0.5f - 0.5f * cosf(phase * 2 * PI));
+}
+static volatile LedState ledState = LedState::Off;
+constexpr int LED_CHANNEL = 0;
+
+static void showLed(uint8_t level, uint8_t r, uint8_t g, uint8_t b) {
+  ledcWrite(LED_CHANNEL, level);
+  if (RGB_LED_PIN >= 0) {
+    neopixelWrite(RGB_LED_PIN, r * RGB_LEVEL / 255, g * RGB_LEVEL / 255,
+                  b * RGB_LEVEL / 255);
+  }
+}
+
+static void ledTask(void*) {
+  for (;;) {
+    switch (ledState) {
+      case LedState::Recording:
+        showLed(255, 255, 0, 0);
+        break;
+      case LedState::Thinking: {
+        uint8_t v = pulse(1200);
+        showLed(v, 0, 0, v);
+        break;
+      }
+      case LedState::Tool: {
+        uint8_t v = pulse(400);
+        showLed(v, 0, v * 7 / 10, v);
+        break;
+      }
+      case LedState::Speaking: {
+        bool on = (millis() / 80) % 2;
+        showLed(on ? 255 : 40, on ? 160 : 25, 0, on ? 255 : 40);
+        break;
+      }
+      case LedState::Connecting: {
+        bool on = (millis() / 300) % 2;
+        showLed(on ? 255 : 0, on ? 255 : 0, on ? 160 : 0, 0);
+        break;
+      }
+      case LedState::On:
+        showLed(255, 255, 80, 0);
+        break;
+      default:
+        showLed(0, 0, 0, 0);
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
+static void setupLed() {
+  ledcSetup(LED_CHANNEL, 5000, 8);
+  ledcAttachPin(LED, LED_CHANNEL);
+  xTaskCreatePinnedToCore(ledTask, "led", 2048, nullptr, 1, nullptr, 0);
+}
 
 // ---------- I2S ----------
 
@@ -168,18 +240,99 @@ static bool readLine(String& line, uint32_t timeoutMs) {
   return true;
 }
 
-// Liest bis zu `len` Bytes und spielt sie ab; liefert die Anzahl gelesener Bytes.
-static size_t pumpAudio(size_t len, uint32_t timeoutMs) {
-  static uint8_t buf[1024];
-  size_t done = 0;
-  while (done < len) {
-    if (!waitAvailable(timeoutMs)) break;
-    int n = client.read(buf, min(sizeof(buf), len - done));
-    if (n <= 0) break;
-    playBytes(buf, n);
-    done += n;
+// Antwortkoerper, egal ob chunked oder mit Content-Length: readBody liefert die Nutzdaten ohne die
+// Chunk-Zeilen. bodyLeft ist der Rest des aktuellen Chunks bzw. des Koerpers (-1 = bis zum Ende
+// der Verbindung).
+static bool bodyChunked = false;
+static long bodyLeft = 0;
+static bool bodyDone = false;
+
+static int readBody(uint8_t* buf, size_t len, uint32_t timeoutMs) {
+  if (bodyDone) return 0;
+  if (bodyChunked && bodyLeft == 0) {
+    String line;
+    if (!readLine(line, timeoutMs)) {
+      bodyDone = true;
+      return 0;
+    }
+    bodyLeft = strtol(line.c_str(), nullptr, 16);
+    if (bodyLeft <= 0) {
+      bodyDone = true;
+      return 0;
+    }
   }
-  return done;
+  size_t want = bodyLeft >= 0 ? min(len, (size_t)bodyLeft) : len;
+  if (!waitAvailable(timeoutMs)) {
+    bodyDone = true;
+    return 0;
+  }
+  int n = client.read(buf, want);
+  if (n <= 0) {
+    bodyDone = true;
+    return 0;
+  }
+  if (bodyLeft > 0) {
+    bodyLeft -= n;
+    if (bodyLeft == 0) {
+      if (bodyChunked) {
+        String crlf;
+        readLine(crlf, 5000);  // CRLF nach dem Chunk
+      } else {
+        bodyDone = true;
+      }
+    }
+  }
+  return n;
+}
+
+static bool readExact(uint8_t* buf, size_t len, uint32_t timeoutMs) {
+  size_t got = 0;
+  while (got < len) {
+    int n = readBody(buf + got, len - got, timeoutMs);
+    if (n <= 0) return false;
+    got += n;
+  }
+  return true;
+}
+
+constexpr uint8_t FRAME_AUDIO = 1;
+constexpr uint8_t FRAME_STATUS = 2;
+
+static void showStatus(const char* status) {
+  if (!strcmp(status, "thinking")) ledState = LedState::Thinking;
+  else if (!strncmp(status, "tool:", 5)) ledState = LedState::Tool;
+  else if (!strcmp(status, "speaking")) ledState = LedState::Speaking;
+  Serial.printf("[%lu ms] %s\n", (unsigned long)millis(), status);
+}
+
+// Spielt die Rahmen der Antwort ab, bis der Server fertig ist.
+static void playFrames() {
+  static uint8_t buf[1024];
+  uint8_t head[5];
+  bool spoke = false;
+  // Die erste Antwort kann auf ein langsames Werkzeug warten.
+  while (readExact(head, sizeof(head), 60000)) {
+    uint32_t len = head[1] | (head[2] << 8) | (head[3] << 16) | ((uint32_t)head[4] << 24);
+    if (head[0] == FRAME_STATUS && len < 128) {
+      char status[128];
+      if (!readExact((uint8_t*)status, len, 10000)) break;
+      status[len] = '\0';
+      showStatus(status);
+      continue;
+    }
+    if (head[0] == FRAME_AUDIO) {
+      if (!spoke) Serial.printf("[%lu ms] spricht\n", (unsigned long)millis());
+      spoke = true;
+      ledState = LedState::Off;  // der Assistent spricht
+    }
+    // Audio abspielen, Unbekanntes ueberspringen.
+    while (len > 0) {
+      int n = readBody(buf, min((uint32_t)sizeof(buf), len), 45000);
+      if (n <= 0) return;
+      if (head[0] == FRAME_AUDIO) playBytes(buf, n);
+      len -= n;
+    }
+  }
 }
 
 static void writeChunk(const uint8_t* data, size_t len) {
@@ -190,9 +343,9 @@ static void writeChunk(const uint8_t* data, size_t len) {
 
 static void blink(int times) {
   for (int i = 0; i < times; i++) {
-    digitalWrite(LED, HIGH);
+    ledState = LedState::On;
     delay(120);
-    digitalWrite(LED, LOW);
+    ledState = LedState::Off;
     delay(120);
   }
 }
@@ -226,22 +379,16 @@ static void playResponse() {
 
   i2s_set_clk(AMP_PORT, rate, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO);
   hasCarry = false;
-  if (chunked) {
-    for (;;) {
-      if (!readLine(line, 45000)) break;
-      long size = strtol(line.c_str(), nullptr, 16);
-      if (size <= 0) break;
-      if (pumpAudio(size, 45000) < (size_t)size) break;
-      readLine(line, 5000);  // CRLF nach dem Chunk
-    }
-  } else {
-    pumpAudio(contentLength >= 0 ? contentLength : SIZE_MAX, 45000);
-  }
+  bodyChunked = chunked;
+  bodyLeft = chunked ? 0 : contentLength;
+  bodyDone = !chunked && contentLength == 0;
+  playFrames();
+  ledState = LedState::Off;
   i2s_zero_dma_buffer(AMP_PORT);
 }
 
 static void conversation() {
-  digitalWrite(LED, HIGH);
+  ledState = LedState::Recording;
   xStreamBufferReset(audioBuffer);
   droppedBytes = 0;
   peakLevel = 0;
@@ -252,7 +399,7 @@ static void conversation() {
   uint32_t connectMs = millis() - start;
   if (!connected) {
     recording = false;
-    digitalWrite(LED, LOW);
+    ledState = LedState::Off;
     Serial.println("Verbindung zum Server fehlgeschlagen");
     blink(5);
     return;
@@ -283,7 +430,8 @@ static void conversation() {
     }
   }
   client.print("0\r\n\r\n");
-  digitalWrite(LED, LOW);
+  ledState = LedState::Thinking;
+  Serial.printf("[%lu ms] losgelassen\n", (unsigned long)millis());
   Serial.printf(
       "Taster %.1f s gedrueckt, %.1f s Audio gesendet, %.1f s verworfen, Spitzenpegel %d/32767, "
       "Verbindung nach %u ms\n",
@@ -300,11 +448,11 @@ static void connectWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);  // sonst deutlich hoehere Latenz
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  ledState = LedState::Connecting;
   Serial.printf("WLAN %s", WIFI_SSID);
   uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print('.');
-    digitalWrite(LED, !digitalRead(LED));
     delay(300);
     if (millis() - start > 15000) {
       // Hilft bei der Fehlersuche: Ist das Netz ueberhaupt sichtbar (nur 2,4 GHz)?
@@ -322,14 +470,14 @@ static void connectWifi() {
       start = millis();
     }
   }
-  digitalWrite(LED, LOW);
+  ledState = LedState::Off;
   Serial.printf(" verbunden, IP %s\n", WiFi.localIP().toString().c_str());
 }
 
 void setup() {
   Serial.begin(115200);
   pinMode(BUTTON, INPUT_PULLUP);
-  pinMode(LED, OUTPUT);
+  setupLed();
 
   audioBuffer = xStreamBufferCreate(AUDIO_BUFFER_BYTES, 1);
   setupMic();
