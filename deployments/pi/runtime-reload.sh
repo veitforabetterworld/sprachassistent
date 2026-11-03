@@ -13,6 +13,9 @@ for f in bin/sprachassistent bin/lib/libsherpa-onnx-c-api.so apps/api/dist/index
 done
 grep -q '^DATABASE_URL=' .env 2>/dev/null \
   || { echo "ERROR: DATABASE_URL fehlt in $REPO/.env, zuerst deployments/pi/bootstrap.sh ausfuehren." >&2; exit 1; }
+# Without it API keys and tool tokens would be stored in plain text.
+grep -q '^CREDENTIALS_KEY=.\+' .env 2>/dev/null \
+  || { echo "ERROR: CREDENTIALS_KEY fehlt in $REPO/.env, zuerst deployments/pi/bootstrap.sh ausfuehren." >&2; exit 1; }
 
 log "Sprachmodelle"
 bash deployments/pi/download-models.sh

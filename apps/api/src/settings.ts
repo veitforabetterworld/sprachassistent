@@ -53,7 +53,7 @@ export async function saveSettings(values: Record<string, string>): Promise<void
   }
 }
 
-/** Rewrites plaintext provider keys and password settings once CREDENTIALS_KEY is set. */
+/** Rewrites plaintext provider keys, tool server tokens and password settings once CREDENTIALS_KEY is set. */
 export async function migratePlaintextSecrets(): Promise<void> {
   if (!credentialsEnabled()) return;
   const providers = await pool.query<{ id: string; api_key: string }>(
@@ -61,6 +61,15 @@ export async function migratePlaintextSecrets(): Promise<void> {
   );
   for (const row of providers.rows) {
     await pool.query(`UPDATE llm_providers SET api_key = $2 WHERE id = $1`, [row.id, encrypt(row.api_key)]);
+  }
+  // Tokens of tool servers: the bearer token and the Google sign-in.
+  for (const column of ["secret_enc", "oauth_enc"] as const) {
+    const servers = await pool.query<{ id: string; value: string }>(
+      `SELECT id, ${column} AS value FROM mcp_servers WHERE ${column} <> '' AND ${column} NOT LIKE 'enc1:%'`,
+    );
+    for (const row of servers.rows) {
+      await pool.query(`UPDATE mcp_servers SET ${column} = $2 WHERE id = $1`, [row.id, encrypt(row.value)]);
+    }
   }
   const settings = await pool.query<{ key: string; value: string }>(
     `SELECT key, value FROM app_settings WHERE key = ANY($1) AND value <> '' AND value NOT LIKE 'enc1:%'`,
