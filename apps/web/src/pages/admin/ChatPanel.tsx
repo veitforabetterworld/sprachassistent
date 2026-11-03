@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUp, ChevronRight, Mic, Square, Volume2 } from "lucide-react";
+import { ArrowUp, ChevronRight, Loader2, Mic, Square, Volume2 } from "lucide-react";
 import { VeitButton, VeitInput, VeitScrollArea } from "@veit/react-controls";
 import { adminApi, speakUrl, transcribe, type Message, type ToolCallMeta } from "../../api";
 import { useI18n } from "../../i18n/I18nProvider";
 
 type Action = { id: string; name: string; detail: string; error: boolean };
 type Turn = { id: string; user?: Message; actions: Action[]; reply?: Message };
+type Speech = { id: string; url: string | null; player: HTMLAudioElement | null };
 
 function pretty(value: string): string {
   const text = value.trim();
@@ -172,9 +173,9 @@ export function ChatPanel({ deviceId, historyVersion = 0 }: { deviceId: string; 
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [playing, setPlaying] = useState<string | null>(null);
+  const [playing, setPlaying] = useState<{ id: string; loading: boolean } | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
-  const audio = useRef<HTMLAudioElement | null>(null);
+  const speech = useRef<Speech | null>(null);
   const recorder = useRef<MediaRecorder | null>(null);
   const chunks = useRef<Blob[]>([]);
 
@@ -187,10 +188,16 @@ export function ChatPanel({ deviceId, historyVersion = 0 }: { deviceId: string; 
     bottom.current?.scrollIntoView({ block: "end" });
   }, [messages, busy, notice]);
 
-  const stopAudio = () => {
-    audio.current?.pause();
+  /** At most one voice output: stops the current one (loading or playing) and frees its blob URL. */
+  const stopAudio = useCallback(() => {
+    const current = speech.current;
+    speech.current = null;
+    current?.player?.pause();
+    if (current?.url) URL.revokeObjectURL(current.url);
     setPlaying(null);
-  };
+  }, []);
+
+  useEffect(() => stopAudio, [deviceId, stopAudio]);
 
   const send = async (body: string) => {
     const value = body.trim();
@@ -212,21 +219,32 @@ export function ChatPanel({ deviceId, historyVersion = 0 }: { deviceId: string; 
   };
 
   const speak = async (message: Message) => {
-    if (playing === message.id) {
-      stopAudio();
+    const current = speech.current;
+    if (current?.id === message.id) {
+      if (current.player) stopAudio();
       return;
     }
     stopAudio();
     setNotice(null);
+    const entry: Speech = { id: message.id, url: null, player: null };
+    speech.current = entry;
+    setPlaying({ id: message.id, loading: true });
     try {
       const url = await speakUrl(deviceId, message.content);
-      const player = new Audio(url);
-      audio.current = player;
-      setPlaying(message.id);
-      player.onended = () => setPlaying((current) => (current === message.id ? null : current));
-      await player.play();
+      if (speech.current !== entry) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      entry.url = url;
+      entry.player = new Audio(url);
+      entry.player.onended = () => {
+        if (speech.current === entry) stopAudio();
+      };
+      setPlaying({ id: message.id, loading: false });
+      await entry.player.play();
     } catch (error) {
-      setPlaying(null);
+      if (speech.current !== entry) return;
+      stopAudio();
       setNotice(error instanceof Error ? error.message : t("error"));
     }
   };
@@ -288,10 +306,19 @@ export function ChatPanel({ deviceId, historyVersion = 0 }: { deviceId: string; 
                 <VeitButton
                   type="button"
                   variant="ghost"
-                  aria-label={playing === turn.reply.id ? t("chatStop") : t("chatSpeak")}
+                  aria-label={
+                    playing?.id !== turn.reply.id ? t("chatSpeak") : playing.loading ? t("chatSpeakLoading") : t("chatStop")
+                  }
+                  disabled={playing?.id === turn.reply.id && playing.loading}
                   onClick={() => void speak(turn.reply!)}
                 >
-                  {playing === turn.reply.id ? <Square className="size-4" aria-hidden /> : <Volume2 className="size-4" aria-hidden />}
+                  {playing?.id !== turn.reply.id ? (
+                    <Volume2 className="size-4" aria-hidden />
+                  ) : playing.loading ? (
+                    <Loader2 className="size-4 animate-spin" aria-hidden />
+                  ) : (
+                    <Square className="size-4" aria-hidden />
+                  )}
                 </VeitButton>
               </div>
             )}

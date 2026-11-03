@@ -268,6 +268,7 @@ export const de = {
   chatMic: "Einsprechen",
   chatMicStop: "Aufnahme beenden",
   chatSpeak: "Vorlesen",
+  chatSpeakLoading: "Wird geladen …",
   chatStop: "Stopp",
   chatAction: "{count} Aktion",
   chatActions: "{count} Aktionen",

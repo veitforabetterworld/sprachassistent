@@ -270,6 +270,7 @@ export const en: Record<MessageKey, string> = {
   chatMic: "Dictate",
   chatMicStop: "Stop recording",
   chatSpeak: "Read aloud",
+  chatSpeakLoading: "Loading …",
   chatStop: "Stop",
   chatAction: "{count} action",
   chatActions: "{count} actions",
