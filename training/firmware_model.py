@@ -1,10 +1,11 @@
-"""Schreibt ein trainiertes Modell als Header fuer die Firmware: firmware/src/wakeword_<wort>.h
+"""Schreibt ein trainiertes Modell als firmware/wakewords/<wort>.h und legt in platformio.ini das
+Env [env:<wort>] an, falls es fehlt. Danach: cd firmware && pio run -e <wort> -t upload
 
-    python firmware_model.py --word giraffe --cutoff 0.90
+    python firmware_model.py --word giraffe --cutoff 0.97
     python firmware_model.py --word giraffe --tflite pfad/zum/modell.tflite --cutoff 0.97
 
-Die Schwelle (Wahrscheinlichkeit, gemittelt ueber --window Inferenzen) waehlt man anhand der
-Testergebnisse des Trainings und am Geraet.
+Die Schwelle (Wahrscheinlichkeit, gemittelt ueber --window Inferenzen) waehlt man mit eval_clips.py
+und am Geraet: hoeher = weniger Fehlausloesungen, aber mehr ueberhoerte Rufe.
 """
 
 import argparse
@@ -13,7 +14,21 @@ from pathlib import Path
 from words import WAKE_WORDS
 
 ROOT = Path(__file__).resolve().parent
-FIRMWARE_SRC = ROOT.parent / "firmware" / "src"
+# Im Container ist firmware/ unter /firmware eingebunden (compose.yaml), sonst liegt es neben training/
+FIRMWARE = Path("/firmware") if Path("/firmware/platformio.ini").exists() else ROOT.parent / "firmware"
+
+
+def add_env(word: str):
+    ini = FIRMWARE / "platformio.ini"
+    text = ini.read_text(encoding="utf-8")
+    if f"[env:{word}]" in text:
+        return
+    block = f"[env:{word}]\nextends = wakeword\ncustom_wakeword = {word}\n\n"
+    # vor die Test-Envs, sonst ans Ende
+    anchor = "[env:hwtest]"
+    text = text.replace(anchor, block + anchor, 1) if anchor in text else text.rstrip("\n") + "\n\n" + block
+    ini.write_text(text, encoding="utf-8", newline="\n")
+    print(f"{ini}: [env:{word}] angelegt")
 
 
 def main():
@@ -29,9 +44,10 @@ def main():
     data = tflite.read_bytes()
     lines = [", ".join(f"0x{b:02x}" for b in data[i : i + 16]) for i in range(0, len(data), 16)]
     name = WAKE_WORDS[args.word]
-    out = FIRMWARE_SRC / f"wakeword_{args.word}.h"
+    out = FIRMWARE / "wakewords" / f"{args.word}.h"
     out.write_text(
         f"// Wake Word \"{name}\", erzeugt von training/firmware_model.py aus {tflite.name}\n"
+        "// Lizenz: CC BY-NC-SA 4.0 (siehe LICENSE in diesem Ordner); Trainingsdaten siehe docs/lizenzen.md\n"
         "#pragma once\n#include <stdint.h>\n\n"
         f"constexpr const char* WAKEWORD_NAME = \"{name}\";\n"
         f"constexpr uint8_t WAKEWORD_CUTOFF = {round(args.cutoff * 255)};  // {args.cutoff:.2f}\n"
@@ -42,6 +58,7 @@ def main():
         newline="\n",
     )
     print(f"{out}: {len(data)} Bytes Modell, Schwelle {args.cutoff}")
+    add_env(args.word)
 
 
 if __name__ == "__main__":

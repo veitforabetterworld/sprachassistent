@@ -1,5 +1,5 @@
 // Sprachassistent-Client: Taster halten und sprechen, loslassen, Antwort hoeren.
-// Mit Wake Word (Env giraffe/computer, siehe wakeword.h) auch: Wort sagen, sprechen, nach einer
+// Mit Wake Word (Envs mit custom_wakeword, siehe platformio.ini) auch: Wort sagen, sprechen, nach einer
 // kurzen Pause endet die Aufnahme von selbst.
 //
 // Waehrend der Taster gedrueckt ist, wird das Mikrofon als 16 kHz / 16 Bit mono an POST /v1/talk

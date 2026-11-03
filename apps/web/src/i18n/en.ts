@@ -166,7 +166,7 @@ export const en: Record<MessageKey, string> = {
   smtpNoFrom: "no sender",
   notConfigured: "not set up",
   speechTitle: "Speech recognition and output",
-  speechHint: "Takes effect after a restart of the voice server (pm2 restart sprachassistent-voice).",
+  speechHint: "Takes effect after a restart of the voice server.",
   sttModel: "Speech recognition model",
   sttModelHint: "Folder relative to the project, e.g. models/stt/sherpa-onnx-streaming-zipformer-de-kroko-2025-08-06",
   sttThreads: "Threads for speech recognition",

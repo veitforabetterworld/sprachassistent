@@ -1,11 +1,11 @@
-// Wake-Word-Erkennung auf dem ESP (TFLite Micro, Modell aus training/firmware_model.py).
-// Nur aktiv, wenn ein Env mit -DWAKEWORD_GIRAFFE oder -DWAKEWORD_COMPUTER gebaut wird.
+// Wake-Word-Erkennung auf dem ESP (TFLite Micro). Nur in den Envs mit custom_wakeword aktiv; das
+// Modell kommt aus firmware/wakewords/<wort>.h (siehe tools/wakeword.py).
 #pragma once
 
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(WAKEWORD_GIRAFFE) || defined(WAKEWORD_COMPUTER)
+#ifdef WAKEWORD
 #define USE_WAKEWORD 1
 #else
 #define USE_WAKEWORD 0

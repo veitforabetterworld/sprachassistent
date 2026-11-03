@@ -1,4 +1,5 @@
 // Wake Word "Giraffe", erzeugt von training/firmware_model.py aus stream_state_internal_quant.tflite
+// Lizenz: CC BY-NC-SA 4.0 (siehe LICENSE in diesem Ordner); Trainingsdaten siehe docs/lizenzen.md
 #pragma once
 #include <stdint.h>
 

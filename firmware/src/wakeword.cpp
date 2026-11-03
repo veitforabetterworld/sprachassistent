@@ -1,4 +1,4 @@
-// Wake-Word-Erkennung: Frontend und Streaming-Modell wie ESPHome micro_wake_word, siehe docs/wakeword-plan.md.
+// Wake-Word-Erkennung: Frontend und Streaming-Modell wie ESPHome micro_wake_word, siehe docs/wakeword.md.
 
 #include "wakeword.h"
 
@@ -15,11 +15,7 @@
 #include "tensorflow/lite/micro/micro_resource_variable.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
-#if defined(WAKEWORD_GIRAFFE)
-#include "wakeword_giraffe.h"
-#elif defined(WAKEWORD_COMPUTER)
-#include "wakeword_computer.h"
-#endif
+#include "wakeword_model.h"
 
 // Muss zum Training passen (microWakeWord, pymicro-features)
 constexpr int FEATURE_SIZE = 40;

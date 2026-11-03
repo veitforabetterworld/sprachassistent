@@ -1,6 +1,6 @@
 //! MCP client. Streamable HTTP via the official Rust SDK (`rmcp`), which negotiates the current
 //! spec and older revisions. stdio is stored but not started: a child process would share the
-//! voice server's OS user and sit next to Whisper on the Pi.
+//! voice server's OS user and sit next to the speech models on the server.
 
 use std::sync::Arc;
 use std::time::Duration;

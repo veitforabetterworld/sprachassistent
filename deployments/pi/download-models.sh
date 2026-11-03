@@ -23,7 +23,7 @@ mkdir -p models/stt
 if [ ! -f "models/stt/$STT_MODEL/tokens.txt" ]; then
   log "Spracherkennung $STT_MODEL"
   rm -rf "models/stt/$STT_MODEL"
-  curl -fL --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$STT_MODEL.tar.bz2" \
+  curl -fsSL --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$STT_MODEL.tar.bz2" \
     | tar -xj -C models/stt
 fi
 # Replaced by the streaming recognizer.
@@ -34,7 +34,7 @@ for voice in "${VOICES[@]}"; do
   [ -f "models/$dir/tokens.txt" ] && continue
   log "Stimme $voice"
   rm -rf "models/$dir"
-  curl -fL --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/$dir.tar.bz2" \
+  curl -fsSL --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/$dir.tar.bz2" \
     | tar -xj -C models
 done
 

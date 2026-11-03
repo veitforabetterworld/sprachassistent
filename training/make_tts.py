@@ -5,6 +5,8 @@ Laeuft im Trainings-Container (siehe Dockerfile):
     python make_tts.py --word giraffe              # Piper (lokal) und Edge TTS
     python make_tts.py --word giraffe --only piper
 
+Woerter, Varianten und Lautschrift stehen in words.py.
+
 Ergebnis: data/tts/<wort>/<quelle>/*.wav und data/tts/aehnlich_<wort>/<quelle>/*.wav, 16 kHz mono.
 """
 
@@ -21,25 +23,17 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import resample_poly
 
-from words import SIMILAR
+from words import SIMILAR, WORDS
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 VOICES = DATA / "piper_voices"
 RATE = 16000
 
-# Varianten im Text aendern die Betonung; "Kompjuter" erzwingt die deutsche Aussprache
-TEXTS = {
-    "giraffe": ["Giraffe", "Giraffe!", "Giraffe?", "Giraffe.", "Giraffe,"],
-    "computer": ["Computer", "Computer!", "Computer?", "Computer.", "Kompjuter", "Kompjuter!"],
-}
-
-# Piper spricht nach espeak "Giraffe" als "GI-raffe" (ˈɡiːrafə); deshalb Lautschrift vorgeben:
-# "gi-RAF-fe" und die verbreitete franzoesische Variante "schi-RAF-fe". Gleiches fuer "Giraffen".
-PHONEMES = {
-    "Giraffe": [list("ɡir") + ["ˈ"] + list("afə"), list("ʒir") + ["ˈ"] + list("afə")],
-    "Giraffen": [list("ɡir") + ["ˈ"] + list("afən"), list("ʒir") + ["ˈ"] + list("afən")],
-}
+# Satzzeichen aendern die Betonung
+PUNCTUATION = ["", "!", "?", ".", ","]
+TEXTS = {key: [t + p for t in [w["text"], *w.get("variants", [])] for p in PUNCTUATION] for key, w in WORDS.items()}
+PHONEMES = {text: [list(p) for p in variants] for w in WORDS.values() for text, variants in w.get("phonemes", {}).items()}
 # Einzelne Woerter, die laenger klingen, sind kaputt (das MLS-Modell plappert gelegentlich weiter)
 MAX_SPEECH_SECONDS = 1.3
 
@@ -173,7 +167,7 @@ def main():
     args = parser.parse_args()
 
     jobs = [(TEXTS[args.word], DATA / "tts" / args.word, 1.0)]
-    if args.similar:
+    if args.similar and SIMILAR[args.word]:
         jobs.append(([w for w in SIMILAR[args.word]], DATA / "tts" / f"aehnlich_{args.word}", 0.5 * args.similar))
 
     for texts, out, factor in jobs:

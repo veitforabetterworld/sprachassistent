@@ -11,7 +11,7 @@ pub struct Config {
     pub database_url: String,
     pub host: String,
     pub port: u16,
-    /// Whisper model and Piper voices (`vits-piper-*` directories).
+    /// Speech recognition model and Piper voices (`vits-piper-*` directories).
     pub models_dir: PathBuf,
     /// Self-hosted SearXNG with the JSON format enabled (`deployments/pi/searxng`).
     pub searxng_url: String,

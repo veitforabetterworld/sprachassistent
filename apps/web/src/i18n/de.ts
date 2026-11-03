@@ -164,7 +164,7 @@ export const de = {
   smtpNoFrom: "kein Absender",
   notConfigured: "nicht eingerichtet",
   speechTitle: "Spracherkennung und -ausgabe",
-  speechHint: "Wird nach einem Neustart des Sprachservers wirksam (pm2 restart sprachassistent-voice).",
+  speechHint: "Wird nach einem Neustart des Sprachservers wirksam.",
   sttModel: "Modell der Spracherkennung",
   sttModelHint: "Ordner relativ zum Projekt, z. B. models/stt/sherpa-onnx-streaming-zipformer-de-kroko-2025-08-06",
   sttThreads: "Threads Spracherkennung",

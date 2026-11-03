@@ -2,7 +2,7 @@
 //
 // Alle 8 Sekunden: Ruhepegel des Mikrofons messen, dann einen Ton ueber den Lautsprecher spielen
 // und gleichzeitig das Mikrofon messen. Hoert das Mikrofon den Ton, funktionieren beide.
-// Dazwischen wird jeder Tastendruck gemeldet. Pins wie in main.cpp.
+// Danach laeuft der Motor 1 s; dazwischen wird jeder Tastendruck gemeldet. Pins wie in main.cpp.
 
 #include <Arduino.h>
 #include <driver/i2s.h>
@@ -14,6 +14,7 @@ constexpr int MIC_SCK = 32, MIC_WS = 33, MIC_SD = 34;
 constexpr int AMP_BCLK = 26, AMP_LRC = 25, AMP_DIN = 27;
 constexpr int BUTTON = 5;
 constexpr int LED = 2;
+constexpr int MOTOR = 4;
 constexpr int MIC_SHIFT = 14;
 constexpr uint32_t RATE = 16000;
 
@@ -138,6 +139,8 @@ void setup() {
   delay(500);
   pinMode(BUTTON, INPUT_PULLUP);
   pinMode(LED, OUTPUT);
+  pinMode(MOTOR, OUTPUT);
+  digitalWrite(MOTOR, LOW);
   lastButton = digitalRead(BUTTON);
   Serial.println();
   Serial.println("=== HWTEST Sprachassistent ===");
@@ -161,6 +164,10 @@ static void testChannel(i2s_channel_fmt_t fmt, const char* name) {
 void loop() {
   testChannel(I2S_CHANNEL_FMT_ONLY_LEFT, "ONLY_LEFT ");
   testChannel(I2S_CHANNEL_FMT_ONLY_RIGHT, "ONLY_RIGHT");
+  Serial.printf("Motor an GPIO %d: 1 s an\n", MOTOR);
+  digitalWrite(MOTOR, HIGH);
+  delay(1000);
+  digitalWrite(MOTOR, LOW);
   uint32_t until = millis() + 3000;
   while (millis() < until) {
     pollButton();

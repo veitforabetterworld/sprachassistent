@@ -1,0 +1,11 @@
+.git
+.env
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+target
+bin
+models
+data
+firmware
+training

@@ -1,8 +1,5 @@
 # Trainingsumgebung fuer die Wake Words (microWakeWord, TensorFlow auf der CPU, Piper und Edge TTS).
-#
-#   docker build -t wakeword-train training
-#   docker run --rm -it -v "%cd%\training:/work" wakeword-train python make_tts.py ...
-#
+# Gestartet ueber compose.yaml: docker compose run --rm train python train.py --word <wort>
 # /work ist der Ordner training/ aus dem Repo, Daten und Modelle landen in /work/data.
 FROM python:3.11-slim
 
@@ -10,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git build-essential ffmpeg libsndfile1 unzip wget ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# microWakeWord auf festem Stand (wie in docs/wakeword-plan.md beschrieben)
+# microWakeWord auf festem Stand, damit Training und Firmware zusammenpassen
 ARG MWW_COMMIT=4665173
 RUN git clone https://github.com/kahrendt/microWakeWord /opt/microWakeWord \
     && cd /opt/microWakeWord && git checkout ${MWW_COMMIT} \

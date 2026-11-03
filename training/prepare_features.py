@@ -91,7 +91,8 @@ def collect(word: str, test_persons: set[str]) -> Path:
         for f in sorted((DATA / "tts" / o).glob("*/*.wav")):
             put("neg_other_word", f, False)
 
-    for person_dir in sorted(p for p in (DATA / "real").iterdir() if p.is_dir() and not p.name.startswith("_")):
+    real = DATA / "real"
+    for person_dir in sorted(p for p in real.glob("*") if p.is_dir() and not p.name.startswith("_")):
         person = person_dir.name
         for f in sorted((person_dir / word).glob("*.wav")):
             test = person in test_persons if test_persons else is_test(f)
@@ -195,7 +196,7 @@ def main():
     print("Clips sammeln und zuschneiden:")
     clips = collect(args.word, {p for p in args.test_persons.split(",") if p})
     out = DATA / "features" / args.word
-    backgrounds = [str(DATA / "fma_16k"), str(clips / "ambient")]
+    backgrounds = [str(d) for d in [DATA / "fma_16k", clips / "ambient"] if d.exists()]
     aug = augmenter(backgrounds)
 
     print("pos_tts:")

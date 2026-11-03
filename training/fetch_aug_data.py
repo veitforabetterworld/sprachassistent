@@ -1,16 +1,17 @@
-"""Bereitet die heruntergeladenen Fremddaten fuer das Training auf (im Trainings-Container).
+"""Laedt und entpackt die Fremddaten fuers Training (im Trainings-Container, einmalig ~6 GB Download):
 
-Erwartet in data/downloads/ (siehe docs/wakeword-plan.md, Phase 2):
-  dinner_party.zip, dinner_party_eval.zip, no_speech.zip, speech.zip  (Features von microWakeWord)
-  fma_xs.zip                                                          (Musik, Free Music Archive)
-
-Laedt zusaetzlich die MIT-Raumimpulsantworten von Hugging Face.
+  Negativ-Features von microWakeWord (Sprache, Partys, Geraeusche) -> data/negative_datasets/
+  Musik aus dem Free Music Archive                                -> data/fma_16k/
+  MIT-Raumimpulsantworten                                         -> data/mit_rirs/
 
     python fetch_aug_data.py
+
+Abgebrochene Downloads werden fortgesetzt; die ZIPs werden nach dem Entpacken geloescht.
 """
 
 import shutil
 import subprocess
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -18,16 +19,44 @@ from tqdm import tqdm
 
 DATA = Path(__file__).resolve().parent / "data"
 DOWNLOADS = DATA / "downloads"
+NEGATIVES_URL = "https://huggingface.co/datasets/kahrendt/microwakeword/resolve/main/{}.zip"
+FMA_URL = "https://huggingface.co/datasets/mchl914/fma_xsmall/resolve/main/fma_xs.zip"
+
+
+def download(url: str) -> Path:
+    """Laedt nach data/downloads/, setzt einen abgebrochenen Download fort."""
+    DOWNLOADS.mkdir(parents=True, exist_ok=True)
+    target = DOWNLOADS / url.rsplit("/", 1)[1]
+    part = target.with_suffix(".part")
+    if target.exists():
+        return target
+    have = part.stat().st_size if part.exists() else 0
+    req = urllib.request.Request(url, headers={"Range": f"bytes={have}-"} if have else {})
+    with urllib.request.urlopen(req) as r:
+        if have and r.status != 206:
+            have = 0
+        total = have + int(r.headers.get("Content-Length", 0))
+        with open(part, "ab" if have else "wb") as f, tqdm(total=total, initial=have, unit="B", unit_scale=True, desc=target.name) as bar:
+            while chunk := r.read(1 << 20):
+                f.write(chunk)
+                bar.update(len(chunk))
+    part.rename(target)
+    return target
 
 
 def unzip_negatives():
     out = DATA / "negative_datasets"
     for name in ["dinner_party", "dinner_party_eval", "no_speech", "speech"]:
-        if (out / name).exists():
+        done = out / name / ".fertig"
+        if done.exists():
             continue
+        archive = download(NEGATIVES_URL.format(name))
         print("entpacke", name)
-        with zipfile.ZipFile(DOWNLOADS / f"{name}.zip") as z:
+        shutil.rmtree(out / name, ignore_errors=True)
+        with zipfile.ZipFile(archive) as z:
             z.extractall(out)
+        done.touch()
+        archive.unlink()
 
 
 def shorten_ambient_eval(hours={"validation_ambient": 1.0, "testing_ambient": 2.0}):
@@ -69,9 +98,11 @@ def fma():
         return
     raw = DATA / "fma"
     if not raw.exists():
+        archive = download(FMA_URL)
         print("entpacke FMA")
-        with zipfile.ZipFile(DOWNLOADS / "fma_xs.zip") as z:
+        with zipfile.ZipFile(archive) as z:
             z.extractall(raw)
+        archive.unlink()
     out.mkdir(parents=True, exist_ok=True)
     for mp3 in tqdm(sorted(raw.glob("**/*.mp3")), desc="FMA -> 16 kHz"):
         subprocess.run(

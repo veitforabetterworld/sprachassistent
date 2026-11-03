@@ -3,11 +3,8 @@
     python train_wakeword.py --word giraffe
     python train_wakeword.py --word giraffe --steps 20000
 
-Das Training liest pro Batch zufaellig aus ~28 GB Features. Ueber den Windows-Bind-Mount ist das extrem
-langsam, deshalb liegen features/ und negative_datasets/ in Docker-Volumes (einmalig hineinkopieren):
-
-    docker run --rm -v "<repo>\\training:/work" -v ww-features:/work/data/features \\
-        -v ww-negatives:/work/data/negative_datasets wakeword-train python train_wakeword.py --word giraffe
+Laeuft normalerweise ueber train.py. Die ~28 GB Features liest es zufaellig, deshalb liegen sie in
+Docker-Volumes (compose.yaml).
 
 Ergebnis: data/models/<wort>/ mit dem quantisierten Streaming-Modell (stream_state_internal_quant.tflite)
 und den Testergebnissen. firmware_model.py macht daraus den Header fuer die Firmware.

@@ -1,0 +1,17 @@
+# Trainingsumgebung fuer Wake Words (microWakeWord auf der CPU, Piper und Edge TTS).
+#   cd training && docker compose run --rm train python train.py --word giraffe
+# Kleine Daten (TTS, Aufnahmen, Modelle) liegen in training/data/. Die ~28 GB Features stehen in
+# Docker-Volumes: das Training liest sie zufaellig, ueber einen Windows/macOS-Ordner waere das sehr langsam.
+services:
+  train:
+    build: .
+    image: wakeword-train
+    volumes:
+      - .:/work
+      - ../firmware:/firmware
+      - features:/work/data/features
+      - negatives:/work/data/negative_datasets
+
+volumes:
+  features: { name: ww-features }
+  negatives: { name: ww-negatives }

@@ -390,14 +390,26 @@ def test(args):
         esp.close()
 
 
+def find_port() -> str:
+    """Der einzige USB-Seriell-Port, sonst der mit einem typischen ESP32-USB-Chip."""
+    from serial.tools import list_ports
+
+    ports = [p for p in list_ports.comports() if p.vid is not None]
+    esp = [p for p in ports if (p.vid, p.pid) in {(0x1A86, 0x7523), (0x1A86, 0x55D4), (0x10C4, 0xEA60), (0x0403, 0x6001)}]
+    for candidates in (esp, ports):
+        if len(candidates) == 1:
+            return candidates[0].device
+    sys.exit("ESP nicht eindeutig gefunden, Port mit --port angeben: " + ", ".join(p.device for p in ports))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--port", default="COM10")
+    parser.add_argument("--port", help="z. B. COM5 oder /dev/ttyUSB0 (Standard: automatisch)")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("test")
     p = sub.add_parser("session")
     p.add_argument("--person", required=True, help="Kuerzel, z. B. veit")
-    p.add_argument("--words", help="z. B. giraffe oder giraffe,computer (Standard: beide)")
+    p.add_argument("--words", help="z. B. giraffe oder giraffe,computer (Standard: alle aus words.py)")
     p.add_argument("--zeit", type=float, default=1.0, help="Faktor fuer alle Wartezeiten, z. B. 1.5 = langsamer")
     p = sub.add_parser("ambient")
     p.add_argument("--name", required=True, help="z. B. kueche, wohnzimmer_abends")
@@ -406,6 +418,7 @@ def main():
     p.add_argument("--dir", required=True)
     p.add_argument("--volume", type=int, default=250, help="Prozent, wie VOLUME_PERCENT in main.cpp")
     args = parser.parse_args()
+    args.port = args.port or find_port()
     {"test": test, "session": session, "ambient": ambient, "speaker": speaker}[args.cmd](args)
 
 

@@ -1,0 +1,37 @@
+# Wie deployments/pi/nginx/sprachassistent.conf. SITE aus der .env: ":80" fuer das Heimnetz (http),
+# ein Domainname fuer HTTPS mit automatischem Let's-Encrypt-Zertifikat.
+{$SITE::80} {
+	encode gzip
+
+	# Aufnahme wird beim Eintreffen erkannt, die Antwort Satz fuer Satz gesprochen: nichts puffern
+	handle /v1/talk {
+		request_body {
+			max_size 12MB
+		}
+		reverse_proxy voice:3020 {
+			flush_interval -1
+		}
+	}
+	handle /v1/health {
+		reverse_proxy voice:3020
+	}
+	handle /v1/* {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy web:3022 {
+			flush_interval -1
+		}
+	}
+	handle /assets/* {
+		root * /srv
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+	handle {
+		root * /srv
+		header Cache-Control "no-cache, must-revalidate"
+		try_files {path} /index.html
+		file_server
+	}
+}

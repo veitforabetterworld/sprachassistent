@@ -1,10 +1,9 @@
-"""Holt TensorFlow Lite Micro und esp-nn fuer die Wake-Word-Erkennung nach firmware/lib/.
+"""PlatformIO-Vorskript fuer die Envs mit Wake Word (extra_scripts in platformio.ini).
 
-Gleiche Versionen wie ESPHome micro_wake_word, damit microWakeWord-Modelle laufen.
-Das Audio-Frontend (esp-micro-speech-features) ist eine PlatformIO-Bibliothek und steht in lib_deps.
-Die Quellen stehen nicht im Repo; library.json legt dieses Skript an.
-
-    python firmware/tools/fetch_wakeword_libs.py
+1. Holt TensorFlow Lite Micro und esp-nn nach firmware/lib/, einmalig. Gleiche Versionen wie ESPHome
+   micro_wake_word, damit microWakeWord-Modelle laufen. Die Quellen stehen nicht im Repo; library.json
+   legt dieses Skript an. Das Audio-Frontend (esp-micro-speech-features) steht in lib_deps.
+2. Stellt das Modell aus custom_wakeword (firmware/wakewords/<wort>.h) als wakeword_model.h bereit.
 """
 
 import json
@@ -12,7 +11,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-LIB_DIR = Path(__file__).resolve().parent.parent / "lib"
 
 TFLM_KERNELS_FROM_ESP_NN = ["add", "conv", "depthwise_conv", "fully_connected", "mul", "pooling", "softmax"]
 
@@ -90,15 +88,14 @@ LIBS = {
 }
 
 
-def fetch(name: str, spec: dict) -> None:
-    target = LIB_DIR / name
+def fetch(lib_dir: Path, name: str, spec: dict) -> None:
+    target = lib_dir / name
     stamp = target / ".version"
     if stamp.exists() and stamp.read_text().strip() == spec["tag"]:
-        print(f"{name} {spec['tag']} ist schon da")
         return
     if target.exists():
         shutil.rmtree(target)
-    tmp = LIB_DIR / f".{name}-tmp"
+    tmp = lib_dir / f".{name}-tmp"
     if tmp.exists():
         shutil.rmtree(tmp)
     subprocess.run(
@@ -118,7 +115,20 @@ def fetch(name: str, spec: dict) -> None:
     print(f"{name} {spec['tag']} geholt")
 
 
-if __name__ == "__main__":
-    LIB_DIR.mkdir(exist_ok=True)
-    for name, spec in LIBS.items():
-        fetch(name, spec)
+Import("env")  # noqa: F821 (von PlatformIO bereitgestellt)
+
+project = Path(env.subst("$PROJECT_DIR"))  # noqa: F821
+(project / "lib").mkdir(exist_ok=True)
+for lib_name, lib_spec in LIBS.items():
+    fetch(project / "lib", lib_name, lib_spec)
+
+word = env.GetProjectOption("custom_wakeword")  # noqa: F821
+model = project / "wakewords" / f"{word}.h"
+if not model.exists():
+    raise SystemExit(f"Kein Modell {model}; erzeugen mit training/train.py --word {word}")
+include = Path(env.subst("$BUILD_DIR")) / "wakeword"  # noqa: F821
+include.mkdir(parents=True, exist_ok=True)
+target = include / "wakeword_model.h"
+if not target.exists() or target.read_bytes() != model.read_bytes():
+    shutil.copyfile(model, target)
+env.Append(CPPPATH=[str(include)])  # noqa: F821
