@@ -25,10 +25,10 @@ constexpr int AMP_LRC = 25;
 constexpr int AMP_DIN = 27;
 // Taster gegen GND (rechte Stiftleiste). GPIO 5 ist ein Strapping-Pin: beim Einschalten nicht drücken.
 constexpr int BUTTON = 5;
-// Freenove ESP32-WROOM: einfarbige LED an GPIO 2. Optional eine WS2812 (RGB) an einem freien Pin,
-// z. B. 4; -1 = keine.
+// Freenove ESP32-WROOM: einfarbige LED an GPIO 2, WS2812 (RGB) an GPIO 16; -1 = keine RGB-LED.
+// neopixelWrite bindet sich beim ersten Aufruf fest an einen Pin, also nur eine RGB-LED.
 constexpr int LED = 2;
-constexpr int RGB_LED_PIN = -1;
+constexpr int RGB_LED_PIN = 16;
 constexpr int RGB_LEVEL = 80;  // 0..255
 
 constexpr i2s_port_t MIC_PORT = I2S_NUM_0;
