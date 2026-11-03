@@ -13,12 +13,14 @@ jobs:
         image: postgres:17
         env:
           POSTGRES_USER: test
-          POSTGRES_PASSWORD: test
           POSTGRES_DB: test
+          # Throwaway database: without SCRAM a connection takes 3 ms instead of about 40 in a debug build.
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports: ["5432:5432"]
         options: --health-cmd pg_isready --health-interval 5s --health-retries 10
     env:
-      TEST_DATABASE_URL: postgres://test:test@localhost:5432/test
+      # The API tests create their own database next to it (sa_api_tests) and migrate it once per run.
+      TEST_DATABASE_URL: postgres://test@localhost:5432/test
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

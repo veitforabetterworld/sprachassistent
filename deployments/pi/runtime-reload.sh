@@ -29,6 +29,10 @@ corepack enable
 # Not --prod: the framework packages list express as optional peer plus dev dependency.
 pnpm install --frozen-lockfile --filter "@sprachassistent/api..."
 
+log "Datenbank migrieren"
+# Before the restart: the servers refuse to start while a migration is missing.
+node apps/api/dist/migrate.js
+
 log "Web -> $WEB_ROOT"
 mkdir -p "$WEB_ROOT"
 rsync -a --delete apps/web/dist/ "$WEB_ROOT/"

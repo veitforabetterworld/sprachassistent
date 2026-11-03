@@ -3,8 +3,9 @@ import helmet from "helmet";
 import { getAuthUser } from "@veit/auth-server/express";
 import { apiKeys, auth, ensureAccountSecrets, isAdmin, verificationRequired } from "./accounts.js";
 import { adminRouter } from "./admin.js";
-import { ensureSchema, pool } from "./db.js";
+import { pool } from "./db.js";
 import { env } from "./env.js";
+import { pendingMigrations } from "./migrate.js";
 import { migratePlaintextSecrets } from "./settings.js";
 
 /**
@@ -12,7 +13,10 @@ import { migratePlaintextSecrets } from "./settings.js";
  * under /v1 here.
  */
 
-await ensureSchema();
+const pending = await pendingMigrations();
+if (pending.length) {
+  throw new Error(`Datenbank nicht migriert (${pending.join(", ")}): pnpm --filter @sprachassistent/api migrate`);
+}
 await ensureAccountSecrets();
 await migratePlaintextSecrets();
 

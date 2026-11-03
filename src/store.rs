@@ -1,7 +1,9 @@
 //! Postgres: settings, AI providers, devices with their memory, and the ESP keys of @veit/api-keys.
-//! The schema comes from db/schema.sql (shared with apps/api); account tables belong to apps/api.
+//! The schema comes from db/migrations, applied by apps/api (`migrate`) at deploy; this server only
+//! checks that none is missing. Account tables belong to apps/api.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -17,9 +19,6 @@ use crate::llm::Provider;
 use crate::mcp::DiscoveredTool;
 use crate::secrets::Secrets;
 
-const SCHEMA: &str = include_str!("../db/schema.sql");
-/// Same number as SCHEMA_LOCK in apps/api/src/db.ts.
-const SCHEMA_LOCK: i64 = 7_351_402;
 /// Same prefix as apps/api/src/accounts.ts. Every key is stored with this permission; callers do not choose one.
 const KEY_PREFIX: &str = "spa_";
 const DEVICE_TALK: &str = "device.talk";
@@ -75,15 +74,27 @@ impl Store {
     }
 
     /// Serialized with apps/api by the same advisory lock: concurrent CREATE ... IF NOT EXISTS can collide.
-    pub async fn migrate(&self) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(SCHEMA_LOCK)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
-        tx.commit().await?;
-        Ok(())
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    /// The files in `dir` (db/migrations) that schema_migrations does not list yet.
+    pub async fn pending_migrations(&self, dir: &Path) -> Result<Vec<String>> {
+        let applied: Vec<(String,)> = match sqlx::query_as("SELECT name FROM schema_migrations")
+            .fetch_all(&self.pool)
+            .await
+        {
+            Ok(rows) => rows,
+            // No table yet: nothing has been migrated.
+            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("42P01") => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        let mut pending: Vec<String> = migration_names(dir)?
+            .into_iter()
+            .filter(|name| !applied.iter().any(|(done,)| done == name))
+            .collect();
+        pending.sort();
+        Ok(pending)
     }
 
     pub async fn ping(&self) -> bool {
@@ -547,6 +558,18 @@ pub struct ToolRow {
 }
 
 /// `hashApiKey` of @veit/api-keys: sha256 of `${pepper}:${key}` as hex.
+/// db/migrations/NNNN_name.sql in the order they run.
+pub fn migration_names(dir: &Path) -> Result<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| {
+            name.ends_with(".sql") && name.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        })
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
 pub fn hash_api_key(key: &str, pepper: &str) -> String {
     let digest = Sha256::digest(format!("{pepper}:{key}").as_bytes());
     digest.iter().map(|b| format!("{b:02x}")).collect()

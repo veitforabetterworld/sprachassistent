@@ -1,5 +1,8 @@
--- Tables of the voice assistant. Idempotent; applied at start by apps/api (after the account tables of
--- @veit/auth-server and @veit/api-keys) and by the Rust server.
+-- Tables of the voice assistant as they stood before numbered migrations. Idempotent, so it also runs
+-- once over a database that the old start-up schema had set up. The account tables of @veit/auth-server
+-- and @veit/api-keys exist already (apps/api/src/migrate.ts creates them first).
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS app_settings (
   key TEXT PRIMARY KEY,
@@ -123,17 +126,11 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   secret_enc TEXT NOT NULL DEFAULT '',
   oauth_enc TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'unknown',
-  -- A code from src/failure.rs; the admin area words it. The detail is technical.
   last_error TEXT NOT NULL DEFAULT '',
-  last_error_detail TEXT NOT NULL DEFAULT '',
   last_ok_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS mcp_servers_user ON mcp_servers (user_id);
-ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS last_error_detail TEXT NOT NULL DEFAULT '';
--- Older rows kept the text itself as the error.
-UPDATE mcp_servers SET last_error_detail = last_error, last_error = 'mcp.failed'
-WHERE last_error <> '' AND last_error NOT LIKE 'mcp.%';
 
 CREATE TABLE IF NOT EXISTS mcp_tools (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -191,3 +188,24 @@ CREATE TABLE IF NOT EXISTS oauth_states (
   server_id UUID NOT NULL,
   expires_at TIMESTAMPTZ NOT NULL
 );
+
+-- Devices and providers from before accounts belong to the first admin.
+UPDATE devices SET user_id = (SELECT id FROM users WHERE is_admin ORDER BY id LIMIT 1)
+WHERE user_id IS NULL AND EXISTS (SELECT 1 FROM users WHERE is_admin);
+UPDATE llm_providers SET user_id = (SELECT id FROM users WHERE is_admin ORDER BY id LIMIT 1)
+WHERE user_id IS NULL AND EXISTS (SELECT 1 FROM users WHERE is_admin);
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'devices_user_fk') THEN
+    ALTER TABLE devices ADD CONSTRAINT devices_user_fk FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'llm_providers_user_fk') THEN
+    ALTER TABLE llm_providers ADD CONSTRAINT llm_providers_user_fk FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mcp_servers_user_fk') THEN
+    ALTER TABLE mcp_servers ADD CONSTRAINT mcp_servers_user_fk FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_runs_user_fk') THEN
+    ALTER TABLE agent_runs ADD CONSTRAINT agent_runs_user_fk FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+  END IF;
+END $$;

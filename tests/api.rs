@@ -21,7 +21,7 @@ use sprachassistent::authz::Effect;
 use sprachassistent::llm::{ChatMessage, ChatModel, ModelTurn, Provider, TokenStream, ToolCall};
 use sprachassistent::secrets::Secrets;
 use sprachassistent::speech::{SpeechToText, TextToSpeech, Transcription, VoiceBank};
-use sprachassistent::store::{hash_api_key, Store};
+use sprachassistent::store::{hash_api_key, migration_names, Store};
 use sprachassistent::tools::{EmptyTools, ToolExecutor, ToolHints, ToolOffer};
 
 const PEPPER: &str = "test-pepper";
@@ -190,33 +190,57 @@ CREATE TABLE IF NOT EXISTS user_api_keys (
   revoked_at TIMESTAMPTZ
 );";
 
+/// Where the tests of this run live: a fresh database next to TEST_DATABASE_URL, migrated once like
+/// apps/api does at deploy. Each test then only adds rows of its own (a user, a chatbot), so the tests
+/// run side by side without touching the schema. None without TEST_DATABASE_URL.
+static DATABASE: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
+const TEST_DB: &str = "sa_api_tests";
+
+async fn test_database() -> Option<String> {
+    DATABASE
+        .get_or_init(|| async {
+            let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+                eprintln!("TEST_DATABASE_URL fehlt, Test uebersprungen");
+                return None;
+            };
+            let server = PgPool::connect(&url).await.unwrap();
+            // Two statements: together they would be one transaction, which CREATE DATABASE refuses.
+            for sql in [
+                format!("DROP DATABASE IF EXISTS {TEST_DB} WITH (FORCE)"),
+                format!("CREATE DATABASE {TEST_DB}"),
+            ] {
+                sqlx::raw_sql(&sql).execute(&server).await.unwrap();
+            }
+            server.close().await;
+            // postgres://user@host/db?options -> the same server, the test database.
+            let (host, _) = url.split('?').next().unwrap().rsplit_once('/').unwrap();
+            let fresh = format!("{host}/{TEST_DB}");
+            let pool = PgPool::connect(&fresh).await.unwrap();
+            sqlx::raw_sql(ACCOUNT_TABLES).execute(&pool).await.unwrap();
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("db/migrations");
+            for name in migration_names(&dir).unwrap() {
+                let sql = std::fs::read_to_string(dir.join(&name)).unwrap();
+                sqlx::raw_sql(&sql)
+                    .execute(&pool)
+                    .await
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+            }
+            sqlx::query("INSERT INTO app_settings (key, value) VALUES ('api_key_pepper', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
+                .bind(PEPPER)
+                .execute(&pool)
+                .await
+                .unwrap();
+            pool.close().await;
+            Some(fresh)
+        })
+        .await
+        .clone()
+}
+
 async fn setup() -> Option<Setup> {
-    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
-        eprintln!("TEST_DATABASE_URL fehlt, Test uebersprungen");
-        return None;
-    };
+    let url = test_database().await?;
     let store = Store::connect(&url).await.unwrap();
-    store.migrate().await.unwrap();
-    let pool = PgPool::connect(&url).await.unwrap();
-    // Tests run in parallel; the same lock as Store::migrate keeps the CREATEs apart.
-    let mut tx = pool.begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(7351402)")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::raw_sql(ACCOUNT_TABLES)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    sqlx::query(
-        "INSERT INTO app_settings (key, value) VALUES ('api_key_pepper', $1)
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-    )
-    .bind(PEPPER)
-    .execute(&pool)
-    .await
-    .unwrap();
+    let pool = store.pool().clone();
     let llm = Arc::new(FakeLlm::default());
     let app = router(AppState {
         assistant: Arc::new(Assistant {
@@ -987,4 +1011,27 @@ async fn a_tool_that_changes_something_brings_the_rules_for_changes() {
     );
     let seen = s.llm.seen.lock().unwrap();
     assert!(seen[0].1[0].content.contains("Lesewerkzeug"));
+}
+
+#[tokio::test]
+async fn the_server_sees_whether_a_migration_is_missing() {
+    let Some(s) = setup().await else { return };
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("db/migrations");
+    // The test database got the files but no ledger, like a database apps/api never migrated.
+    let pending = s.store.pending_migrations(&dir).await.unwrap();
+    assert_eq!(pending, migration_names(&dir).unwrap());
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+    )
+    .execute(&s.pool)
+    .await
+    .unwrap();
+    for name in migration_names(&dir).unwrap() {
+        sqlx::query("INSERT INTO schema_migrations (name) VALUES ($1) ON CONFLICT DO NOTHING")
+            .bind(name)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+    }
+    assert!(s.store.pending_migrations(&dir).await.unwrap().is_empty());
 }

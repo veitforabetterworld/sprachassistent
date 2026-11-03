@@ -36,7 +36,7 @@ src/                 Rust-Sprachserver
   page.rs            HTML als knapper Text ohne Kopf, Menüs und Linklisten
   browser.rs         Headless-Chromium für JavaScript-Seiten, Proxy nur zu öffentlichen Adressen
   sentences.rs       Antwort-Stream in Sätze zerlegen
-db/schema.sql        Tabellen und Standardwerte (Rust und Web-API wenden es an)
+db/migrations/       Nummerierte SQL-Migrationen, je einmal angewandt von apps/api (pnpm --filter @sprachassistent/api migrate)
 apps/api/            Web-API: @veit/auth-server, @veit/api-keys, Admin-Routen
 apps/web/            Adminbereich: @veit/react-auth, -account, -api-keys, -controls
 veit-framework/      Submodule (Pin origin/development)
@@ -82,17 +82,26 @@ git submodule update --init --recursive
 pnpm install && pnpm build:deps
 docker run -d --name sa-pg -e POSTGRES_PASSWORD=sprachassistent -e POSTGRES_USER=sprachassistent -p 5432:5432 postgres:17
 cp .env.example .env
-pnpm dev:api        # Web-API :3022
+pnpm dev:api        # migriert die Datenbank, dann Web-API :3022
 pnpm dev:web        # Adminbereich :5183 (Proxy auf :3020 und :3022)
 docker run -d --name sa-searxng -p 127.0.0.1:8888:8080 -e SEARXNG_SECRET=lokal \
   -v "$PWD/deployments/pi/searxng/settings.yml:/etc/searxng/settings.yml:ro" searxng/searxng:2026.10.27-b5ed73fcb
 cargo run           # Sprachserver :3020 (Linux; ohne Modelle: --no-default-features)
 ```
 
-Tests (Postgres nötig, ohne `TEST_DATABASE_URL` werden die API-Tests übersprungen):
+### Datenbank
+
+Das Schema entsteht aus `db/migrations/NNNN_name.sql`. Jede Datei läuft genau einmal, in Namensreihenfolge, und wird in `schema_migrations` vermerkt; alle fehlenden laufen zusammen in einer Transaktion. Migriert wird nur an einer Stelle: `pnpm --filter @sprachassistent/api migrate` (beim Deploy in `runtime-reload.sh` vor dem Neustart, lokal in `pnpm dev:api`). Web-API und Sprachserver migrieren nicht selbst; fehlt eine Migration, starten sie nicht und nennen sie.
+
+Eine Änderung bekommt immer eine neue Datei, eine angewandte wird nicht mehr bearbeitet. Bis beide Server neu gestartet sind, läuft kurz noch der alte Code gegen das neue Schema: Spalten erst hinzufügen, später in einer eigenen Migration entfernen.
+
+### Tests
+
+Postgres nötig; ohne `TEST_DATABASE_URL` werden die API-Tests übersprungen. Sie legen daneben pro Lauf die Datenbank `sa_api_tests` frisch an und migrieren sie einmal; jeder Test arbeitet danach mit eigenen Nutzern und Chatbots, so laufen sie parallel. Ein Wegwerf-Postgres ohne Passwort hält den Verbindungsaufbau kurz:
 
 ```bash
-TEST_DATABASE_URL=postgres://… cargo test --no-default-features
+docker run -d --name sa-test-pg -p 127.0.0.1:55432:5432 -e POSTGRES_USER=t -e POSTGRES_DB=t -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17-alpine
+TEST_DATABASE_URL=postgres://t@127.0.0.1:55432/t cargo test --no-default-features
 pnpm typecheck
 ```
 
@@ -123,7 +132,7 @@ Einmalig als root (legt Postgres-Rolle und -Datenbank und `.env` an, lädt Whisp
 DEPLOY_PUBKEY="ssh-ed25519 AAAA... github-actions-sprachassistent" bash deployments/pi/bootstrap.sh
 ```
 
-Im GitHub-Environment `production` müssen `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY` und `DEPLOY_PATH` gesetzt sein. Ein Push auf `deploy` baut Sprachserver, Web-API und Adminbereich und kopiert alles auf den Pi; `runtime-reload.sh` installiert die Node-Abhängigkeiten, kopiert die Weboberfläche nach `/var/www/sprachassistent/app` und startet pm2 neu (`sprachassistent-voice`, `sprachassistent-web`).
+Im GitHub-Environment `production` müssen `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY` und `DEPLOY_PATH` gesetzt sein. Ein Push auf `deploy` baut Sprachserver, Web-API und Adminbereich und kopiert alles auf den Pi; `runtime-reload.sh` installiert die Node-Abhängigkeiten, migriert die Datenbank, kopiert die Weboberfläche nach `/var/www/sprachassistent/app` und startet pm2 neu (`sprachassistent-voice`, `sprachassistent-web`).
 
 ## Branches
 

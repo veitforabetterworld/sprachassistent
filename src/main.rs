@@ -25,7 +25,16 @@ async fn main() -> Result<()> {
     let store = Store::connect(&config.database_url)
         .await
         .context("Datenbank nicht erreichbar (DATABASE_URL)")?;
-    store.migrate().await?;
+    let pending = store
+        .pending_migrations(std::path::Path::new("db/migrations"))
+        .await
+        .context("Migrationen nicht lesbar (db/migrations)")?;
+    if !pending.is_empty() {
+        anyhow::bail!(
+            "Datenbank nicht migriert ({}): pnpm --filter @sprachassistent/api migrate",
+            pending.join(", ")
+        );
+    }
     // Speech settings are read once; the admin area says that they need a restart.
     let settings = store.settings().await?;
 
