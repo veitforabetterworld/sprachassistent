@@ -418,7 +418,7 @@ export function adminRouter(): Router {
     handle(async (req, res) => {
       const id = await ownedDevice(req, parse(uuid, req.params.id));
       const what = parse(z.enum(["context", "messages", "all"]).default("all"), req.query.what);
-      if (what !== "messages") await pool.query(`UPDATE devices SET context = '' WHERE id = $1`, [id]);
+      if (what !== "messages") await pool.query(`UPDATE devices SET context = DEFAULT WHERE id = $1`, [id]);
       if (what !== "context") await pool.query(`DELETE FROM device_messages WHERE device_id = $1`, [id]);
       res.status(204).end();
     }),

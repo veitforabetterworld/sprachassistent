@@ -96,6 +96,10 @@ DROP TABLE IF EXISTS device_facts;
 ALTER TABLE devices DROP COLUMN IF EXISTS history_messages;
 ALTER TABLE devices DROP COLUMN IF EXISTS memory_extraction;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS context TEXT NOT NULL DEFAULT '';
+-- New chatbots start with an example, so the model sees what a context looks like.
+-- Resetting the context in the admin area goes back to this text.
+ALTER TABLE devices ALTER COLUMN context
+  SET DEFAULT 'Neuer Chat, noch kein Gespräch. Nutzer: unbekannt. Thema: keins.';
 -- Every model may call tools now; the chatbot's tools_enabled is the only switch.
 ALTER TABLE llm_providers DROP COLUMN IF EXISTS supports_tools;
 ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS nudge_tools BOOLEAN NOT NULL DEFAULT false;

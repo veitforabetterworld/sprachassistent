@@ -569,6 +569,14 @@ async fn small_talk_is_answered_at_once_without_nudge() {
     assert_eq!(reply["reply"], "Hallo!");
     assert_eq!(*tools.calls.lock().unwrap(), 0);
     assert_eq!(*s.llm.offered.lock().unwrap(), vec![(1, false)]);
+    // A new chatbot starts with the example context in front of its first question.
+    let seen = s.llm.seen.lock().unwrap();
+    assert!(seen[0]
+        .1
+        .last()
+        .unwrap()
+        .content
+        .starts_with("[kontext]\nNeuer Chat, noch kein Gespräch."));
 }
 
 #[tokio::test]
