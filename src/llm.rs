@@ -119,6 +119,8 @@ pub struct ModelTurn {
     pub provider: String,
     /// That provider wants a reply without a tool sent back once (`Provider::nudge_tools`).
     pub nudge_tools: bool,
+    /// Why the model stopped (`stop`, `length`, `tool_calls`, ...), empty when it did not say.
+    pub finish_reason: String,
 }
 
 /// Providers come with every call: each device has its own order (its provider first, then the others).
@@ -611,6 +613,10 @@ fn parse_turn(v: &Value, provider: &str) -> Result<ModelTurn> {
         provider: provider.to_string(),
         // `ask` sets it from the provider.
         nudge_tools: false,
+        finish_reason: v["choices"][0]["finish_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -646,7 +652,7 @@ impl ChatModel for Llm {
             match self.post(p, &body, ANSWER_WAIT).await {
                 Ok(resp) => {
                     tracing::debug!("LLM-Stream von {}", p.name);
-                    return Ok(sse_tokens(resp));
+                    return Ok(sse_tokens(resp, p.name.clone()));
                 }
                 Err(e) => {
                     tracing::warn!("{} fehlgeschlagen: {}", p.name, redact(&format!("{e:#}")));
@@ -693,6 +699,12 @@ impl Llm {
             Ok(resp) => {
                 let mut turn = parse_turn(&resp.json().await?, &provider.name)?;
                 turn.nudge_tools = provider.nudge_tools;
+                tracing::info!(
+                    "{}: Ende {}, {} Tokens",
+                    provider.name,
+                    finish_label(&turn.finish_reason),
+                    turn.output_tokens
+                );
                 Ok(turn)
             }
             Err(e) => {
@@ -710,6 +722,7 @@ impl Llm {
                         output_tokens: 0,
                         provider: provider.name.clone(),
                         nudge_tools: provider.nudge_tools,
+                        finish_reason: "salvaged".into(),
                     });
                 }
                 bail!(text)
@@ -723,6 +736,24 @@ enum SseEvent {
     Token(String),
     Done,
     Skip,
+}
+
+/// For the log: a missing reason usually means the connection ended early.
+fn finish_label(reason: &str) -> &str {
+    if reason.is_empty() {
+        "ohne Abbruchgrund"
+    } else {
+        reason
+    }
+}
+
+/// The stream's last chunk names why the model stopped.
+fn sse_finish_reason(line: &str) -> Option<String> {
+    let data = line.strip_prefix("data:")?.trim();
+    let v: Value = serde_json::from_str(data).ok()?;
+    v["choices"][0]["finish_reason"]
+        .as_str()
+        .map(str::to_string)
 }
 
 fn parse_sse_line(line: &str) -> SseEvent {
@@ -741,22 +772,33 @@ fn parse_sse_line(line: &str) -> SseEvent {
     }
 }
 
-fn sse_tokens(resp: reqwest::Response) -> TokenStream {
+fn sse_tokens(resp: reqwest::Response, provider: String) -> TokenStream {
     Box::pin(async_stream::try_stream! {
         let mut bytes = resp.bytes_stream();
         // Bytes, not String: a UTF-8 character can be split across network chunks.
         let mut buf: Vec<u8> = Vec::new();
+        let mut finish = String::new();
+        let mut pieces = 0usize;
         'read: while let Some(chunk) = bytes.next().await {
             buf.extend_from_slice(&chunk?);
             while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=pos).collect();
-                match parse_sse_line(String::from_utf8_lossy(&line).trim()) {
-                    SseEvent::Token(t) => yield t,
+                let line = String::from_utf8_lossy(&line);
+                let line = line.trim();
+                if let Some(reason) = sse_finish_reason(line) {
+                    finish = reason;
+                }
+                match parse_sse_line(line) {
+                    SseEvent::Token(t) => {
+                        pieces += 1;
+                        yield t
+                    }
                     SseEvent::Done => break 'read,
                     SseEvent::Skip => {}
                 }
             }
         }
+        tracing::info!("{provider}: Stream-Ende {}, {pieces} Teile", finish_label(&finish));
     })
 }
 
@@ -820,6 +862,17 @@ mod tests {
             SseEvent::Skip
         );
         assert_eq!(parse_sse_line(": keep-alive"), SseEvent::Skip);
+        assert_eq!(
+            sse_finish_reason(
+                r#"data: {"choices":[{"delta":{"content":"."},"finish_reason":"length"}]}"#
+            ),
+            Some("length".into())
+        );
+        assert_eq!(
+            sse_finish_reason(r#"data: {"choices":[{"delta":{},"finish_reason":null}]}"#),
+            None
+        );
+        assert_eq!(sse_finish_reason("data: [DONE]"), None);
     }
 
     #[test]

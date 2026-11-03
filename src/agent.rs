@@ -508,7 +508,11 @@ Argumente aus dem vorherigen Werkzeugergebnis übernehmen.",
                 seq,
                 "llm",
                 &turn.provider,
-                json!({"tool_calls": turn.tool_calls.len()}),
+                json!({
+                    "tool_calls": turn.tool_calls.len(),
+                    "finish": turn.finish_reason,
+                    "output_tokens": turn.output_tokens,
+                }),
                 0,
                 "",
             )
