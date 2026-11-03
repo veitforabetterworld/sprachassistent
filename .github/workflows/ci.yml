@@ -43,7 +43,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build:deps
-      - name: Typecheck (incl. no-custom-css, i18n, page size)
+      - name: Typecheck (incl. no-custom-css, i18n, error codes, page size)
         run: pnpm typecheck
       - name: Lint
         run: pnpm lint

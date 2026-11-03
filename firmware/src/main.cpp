@@ -58,6 +58,9 @@ static WiFiClient client;
 // Aufnahme: an (RGB rot). KI denkt: pulsiert langsam (blau). Ein Werkzeug laeuft: pulsiert schnell
 // (tuerkis). Sprache wird erzeugt: flackert (violett). WLAN-Suche: blinkt (gelb). Waehrend der
 // Assistent spricht und sonst: aus.
+// Fehler, auch an der einfarbigen LED zu unterscheiden: Server nicht erreichbar oder keine Antwort:
+// 5x kurz (rot). Schluessel abgelehnt (401/403/404): 3x lang (orange). Anderer Serverfehler: 3x kurz (rot).
+// Spracherkennung aus oder nichts verstanden sagt der Server selbst an.
 
 enum class LedState { Off, On, Recording, Thinking, Tool, Speaking, Connecting };
 
@@ -67,6 +70,8 @@ static uint8_t pulse(uint32_t periodMs) {
   return 15 + 240 * (0.5f - 0.5f * cosf(phase * 2 * PI));
 }
 static volatile LedState ledState = LedState::Off;
+// Farbe von LedState::On an der RGB-LED, siehe blink().
+static volatile uint8_t onRed = 255, onGreen = 80;
 constexpr int LED_CHANNEL = 0;
 
 static void showLed(uint8_t level, uint8_t r, uint8_t g, uint8_t b) {
@@ -104,7 +109,7 @@ static void ledTask(void*) {
         break;
       }
       case LedState::On:
-        showLed(255, 255, 80, 0);
+        showLed(255, onRed, onGreen, 0);
         break;
       default:
         showLed(0, 0, 0, 0);
@@ -341,21 +346,27 @@ static void writeChunk(const uint8_t* data, size_t len) {
   client.print("\r\n");
 }
 
-static void blink(int times) {
+static void blink(int times, uint32_t ms, uint8_t red, uint8_t green) {
+  onRed = red;
+  onGreen = green;
   for (int i = 0; i < times; i++) {
     ledState = LedState::On;
-    delay(120);
+    delay(ms);
     ledState = LedState::Off;
-    delay(120);
+    delay(ms);
   }
 }
+
+static void blinkUnreachable() { blink(5, 120, 255, 0); }
+static void blinkKeyRejected() { blink(3, 400, 255, 80); }
+static void blinkServerError() { blink(3, 120, 255, 0); }
 
 static void playResponse() {
   String line;
   // Wartet auf Spracherkennung und den ersten Satz der Antwort.
   if (!readLine(line, 60000)) {
     Serial.println("Keine Antwort vom Server");
-    blink(3);
+    blinkUnreachable();
     return;
   }
   int status = line.length() >= 12 ? line.substring(9, 12).toInt() : 0;
@@ -372,8 +383,10 @@ static void playResponse() {
   }
   if (status != 200) {
     Serial.printf("HTTP %d\n", status);
+    // Der Koerper ist { "code": ..., "detail": ... }, siehe src/failure.rs.
     while (readLine(line, 2000)) Serial.println(line);
-    blink(3);
+    if (status == 401 || status == 403 || status == 404) blinkKeyRejected();
+    else blinkServerError();
     return;
   }
 
@@ -401,7 +414,7 @@ static void conversation() {
     recording = false;
     ledState = LedState::Off;
     Serial.println("Verbindung zum Server fehlgeschlagen");
-    blink(5);
+    blinkUnreachable();
     return;
   }
   client.printf(
