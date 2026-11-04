@@ -1,6 +1,6 @@
 import { useState, useMemo, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
-import { AppShell, VeitButton } from "@veit/react-controls";
+import { AppShell, VeitButton, VeitToastProvider } from "@veit/react-controls";
 import { createVeitDialogUnsavedConfirm, VeitDialogUnsavedConfirmProvider } from "@veit/react-dialog";
 import { AuthProvider, authClient, errorText, useAccount } from "./api";
 import { I18nProvider, useI18n } from "./i18n/I18nProvider";
@@ -13,6 +13,12 @@ import { McpPage } from "./pages/admin/McpPage";
 import { ProvidersPage } from "./pages/admin/ProvidersPage";
 import { SettingsPage } from "./pages/admin/SettingsPage";
 import { UsersPage } from "./pages/admin/UsersPage";
+
+/** Short confirmations and errors of actions that close their dialog. */
+function Toasts({ children }: { children: ReactNode }) {
+  const { t } = useI18n();
+  return <VeitToastProvider texts={{ close: t("close") }}>{children}</VeitToastProvider>;
+}
 
 /** Asked when an edit dialog with unsaved changes is closed. */
 function UnsavedConfirm({ children }: { children: ReactNode }) {
@@ -84,6 +90,7 @@ export function App() {
   return (
     <I18nProvider>
       <AuthProvider>
+        <Toasts>
         <UnsavedConfirm>
           <AccountGate>
           <Routes>
@@ -110,6 +117,7 @@ export function App() {
           </Routes>
           </AccountGate>
         </UnsavedConfirm>
+        </Toasts>
       </AuthProvider>
     </I18nProvider>
   );

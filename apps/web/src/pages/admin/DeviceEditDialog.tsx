@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { VEIT_SETTINGS_ACTIONS, VeitButton, VeitDeleteButton, VeitField, VeitInput, VeitSelect, VeitSettingsToggleRow, VeitTextarea } from "@veit/react-controls";
+import { useEffect, useMemo, useState } from "react";
+import { VEIT_SETTINGS_ACTIONS, VeitAlert, VeitDeleteButton, VeitField, VeitInput, VeitSelect, VeitSettingsToggleRow, VeitTextarea } from "@veit/react-controls";
 import { VeitOverlayEditDialog, useDialogFormBaseline, useManagedOverlayDialogBinding } from "@veit/react-dialog";
 import { adminApi, errorText, type Device, type DeviceInput, type Voice } from "../../api";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -9,17 +9,19 @@ const DEFAULT_PROVIDER = "default";
 /** Same limit as CONTEXT_CHARS in src/context.rs. */
 const CONTEXT_CHARS = 500;
 
-/** Text fields are edited as strings and converted on save. */
+/** Text fields are edited as strings and converted on save. The context (memory) is saved with the rest. */
 type Draft = Omit<DeviceInput, "speed" | "max_iterations"> & {
   speed: string;
   max_iterations: string;
+  context: string;
 };
 
-function toDraft(d: DeviceInput): Draft {
+function toDraft(d: DeviceInput, context: string): Draft {
   return {
     ...d,
     speed: String(d.speed),
     max_iterations: String(d.max_iterations),
+    context,
   };
 }
 
@@ -32,13 +34,32 @@ type Props = {
   onClose: () => void;
   onSaved: (device: Device) => void;
   onDeleted: () => void;
-  onError: (message: string) => void;
   onHistoryCleared?: () => void;
 };
 
-export function DeviceEditDialog({ open, device, voices, providers, onClose, onSaved, onDeleted, onError, onHistoryCleared }: Props) {
+export function DeviceEditDialog({ open, device, voices, providers, onClose, onSaved, onDeleted, onHistoryCleared }: Props) {
   const { t, tf } = useI18n();
   const binding = useManagedOverlayDialogBinding(open, onClose);
+  /** The stored context of the device; null while it loads (new devices have none). */
+  const [savedContext, setSavedContext] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    setError(null);
+    if (!device) {
+      setSavedContext("");
+      return;
+    }
+    setSavedContext(null);
+    let current = true;
+    adminApi.memory(device.id).then(
+      (memory) => current && setSavedContext(memory.context),
+      (e: unknown) => current && setError(errorText(e)),
+    );
+    return () => {
+      current = false;
+    };
+  }, [open, device]);
   const initial = useMemo(
     () =>
       toDraft(
@@ -53,8 +74,9 @@ export function DeviceEditDialog({ open, device, voices, providers, onClose, onS
           still_busy_phrase: t("defaultStillBusyPhrase"),
           tools_enabled: true,
         },
+        savedContext ?? "",
       ),
-    [device, voices, t],
+    [device, voices, t, savedContext],
   );
   const [draft, setDraft] = useState<Draft>(initial);
   const [saving, setSaving] = useState(false);
@@ -72,17 +94,21 @@ export function DeviceEditDialog({ open, device, voices, providers, onClose, onS
   });
 
   const save = async () => {
+    const { context, ...fields } = draft;
     const input: DeviceInput = {
-      ...draft,
+      ...fields,
       speed: Number(draft.speed.replace(",", ".")) || 1,
       max_iterations: Number(draft.max_iterations) || 6,
     };
     setSaving(true);
+    setError(null);
     try {
-      onSaved(device ? await adminApi.updateDevice(device.id, input) : await adminApi.createDevice(input));
-    } catch (error) {
-      onError(errorText(error));
-      throw error;
+      const saved = device ? await adminApi.updateDevice(device.id, input) : await adminApi.createDevice(input);
+      if (device && savedContext !== null && context.trim() !== savedContext) await adminApi.setContext(device.id, context);
+      onSaved(saved);
+    } catch (e) {
+      setError(errorText(e));
+      throw e;
     } finally {
       setSaving(false);
     }
@@ -176,46 +202,42 @@ export function DeviceEditDialog({ open, device, voices, providers, onClose, onS
           disabled={saving}
           onCheckedChange={(v) => set("tools_enabled", v)}
         />
-        {device && open && <ContextEditor deviceId={device.id} onHistoryCleared={onHistoryCleared} />}
+        {device && (
+          <MemoryFields
+            deviceId={device.id}
+            context={draft.context}
+            loading={savedContext === null}
+            disabled={saving}
+            onContextChange={(context) => set("context", context)}
+            onHistoryCleared={onHistoryCleared}
+          />
+        )}
+        {error && <VeitAlert>{error}</VeitAlert>}
       </div>
     </VeitOverlayEditDialog>
   );
 }
 
-/** The context lives with the chatbot settings. Saving it does not touch the rest of the form. */
-function ContextEditor({ deviceId, onHistoryCleared }: { deviceId: string; onHistoryCleared?: () => void }) {
+/**
+ * The chatbot's memory: the context is part of the draft and saved with the dialog. Deleting the history is an
+ * action of its own (with confirmation), like deleting the chatbot.
+ */
+function MemoryFields({
+  deviceId,
+  context,
+  loading,
+  disabled,
+  onContextChange,
+  onHistoryCleared,
+}: {
+  deviceId: string;
+  context: string;
+  loading: boolean;
+  disabled: boolean;
+  onContextChange: (context: string) => void;
+  onHistoryCleared?: () => void;
+}) {
   const { t, tf } = useI18n();
-  const [saved, setSaved] = useState("");
-  const [context, setContext] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  const reload = useCallback(() => {
-    void adminApi.memory(deviceId).then((memory) => {
-      setSaved(memory.context);
-      setContext(memory.context);
-    });
-  }, [deviceId]);
-  useEffect(reload, [reload]);
-
-  const save = async () => {
-    setError(null);
-    try {
-      const result = await adminApi.setContext(deviceId, context);
-      setSaved(result.context);
-      setContext(result.context);
-    } catch (e) {
-      setError(errorText(e));
-    }
-  };
-
-  const confirm = (title: string) => ({
-    title,
-    message: t("cannotUndo"),
-    confirmLabel: t("delete"),
-    cancelLabel: t("cancel"),
-    destructive: true,
-  });
-
   return (
     <div className="flex flex-col gap-3 border-t border-border pt-4">
       <VeitField
@@ -223,26 +245,25 @@ function ContextEditor({ deviceId, onHistoryCleared }: { deviceId: string; onHis
         htmlFor="device-context"
         hint={`${tf("contextHint", { max: CONTEXT_CHARS })} ${tf("contextCount", { count: context.length, max: CONTEXT_CHARS })}`}
       >
-        <VeitTextarea id="device-context" rows={5} maxLength={CONTEXT_CHARS} value={context} onChange={(e) => setContext(e.target.value)} />
+        <VeitTextarea
+          id="device-context"
+          rows={5}
+          maxLength={CONTEXT_CHARS}
+          value={context}
+          disabled={disabled || loading}
+          onChange={(e) => onContextChange(e.target.value)}
+        />
       </VeitField>
-      {error && <p className="m-0 text-sm text-destructive">{error}</p>}
       <div className={VEIT_SETTINGS_ACTIONS}>
-        <VeitButton type="button" disabled={context === saved} onClick={() => void save()}>
-          {t("saveContext")}
-        </VeitButton>
-        {saved && (
-          <VeitDeleteButton
-            deleteConfirm={confirm(t("clearContextTitle"))}
-            onClick={async () => {
-              await adminApi.clearMemory(deviceId, "context");
-              reload();
-            }}
-          >
-            {t("clearContext")}
-          </VeitDeleteButton>
-        )}
         <VeitDeleteButton
-          deleteConfirm={confirm(t("clearHistoryTitle"))}
+          disabled={disabled}
+          deleteConfirm={{
+            title: t("clearHistoryTitle"),
+            message: t("cannotUndo"),
+            confirmLabel: t("delete"),
+            cancelLabel: t("cancel"),
+            destructive: true,
+          }}
           onClick={async () => {
             await adminApi.clearMemory(deviceId, "messages");
             onHistoryCleared?.();

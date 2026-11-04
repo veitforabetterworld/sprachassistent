@@ -1,21 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { ChevronRight } from "lucide-react";
-import { VeitButton, VeitEmptyState, VeitList, VeitListItem, VeitSettingsSection, VeitStatusBadge, VeitTabBar } from "@veit/react-controls";
-import { adminApi, type Device, type Voice } from "../../api";
+import {
+  VEIT_SETTINGS_ACTIONS,
+  VeitAlert,
+  VeitButton,
+  VeitEmptyState,
+  VeitList,
+  VeitListItem,
+  VeitPage,
+  VeitSettingsSection,
+  VeitSpinner,
+  VeitTabBar,
+} from "@veit/react-controls";
+import { adminApi, errorText, type Device, type Voice } from "../../api";
 import { useI18n } from "../../i18n/I18nProvider";
 import { ChatPanel } from "./ChatPanel";
 import { DeviceEditDialog } from "./DeviceEditDialog";
-
-type Notice = { ok: boolean; text: string } | null;
-
-function NoticeBadge({ notice }: { notice: Notice }) {
-  if (!notice) return null;
-  return (
-    <VeitStatusBadge variant={notice.ok ? "success" : "destructive"} shape="rounded">
-      {notice.text}
-    </VeitStatusBadge>
-  );
-}
 
 const chevron = <ChevronRight className="size-4 text-muted-foreground" aria-hidden />;
 
@@ -48,7 +48,7 @@ export function DevicesPage() {
   const [providers, setProviders] = useState<{ id: string; name: string }[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<Device | "new" | null>(null);
-  const [notice, setNotice] = useState<Notice>(null);
+  const [error, setError] = useState<string | null>(null);
   const [historyVersion, setHistoryVersion] = useState(0);
 
   const reload = useCallback(async (select?: string) => {
@@ -58,7 +58,7 @@ export function DevicesPage() {
   }, []);
 
   useEffect(() => {
-    void reload();
+    reload().catch((e: unknown) => setError(errorText(e)));
     void adminApi.voices().then(setVoices).catch(() => setVoices([]));
     void adminApi.providerChoices().then(setProviders);
   }, [reload]);
@@ -66,22 +66,28 @@ export function DevicesPage() {
   const device = devices?.find((d) => d.id === selected) ?? null;
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-3xl flex-col gap-4 p-4 sm:p-6">
-      <div className="flex flex-wrap items-center gap-3">
-        {devices && devices.length > 0 && (
-          <VeitTabBar ariaLabel={t("devicesTabs")} value={selected ?? ""} onChange={setSelected} items={devices.map((d) => ({ id: d.id, label: d.name }))} />
-        )}
-        <VeitButton variant="secondary" onClick={() => setEditing("new")}>
-          {t("addDevice")}
-        </VeitButton>
-      </div>
-      <NoticeBadge notice={notice} />
-      {devices?.length === 0 && <VeitEmptyState title={t("noDeviceTitle")} description={t("noDeviceText")} />}
+    <VeitPage width="narrow" className="h-full">
+      {error && <VeitAlert>{error}</VeitAlert>}
+      {devices === null && !error && <VeitSpinner label={t("loading")} />}
+      {devices && devices.length > 0 && (
+        <VeitTabBar ariaLabel={t("devicesTabs")} value={selected ?? ""} onChange={setSelected} items={devices.map((d) => ({ id: d.id, label: d.name }))} />
+      )}
+      {devices && (
+        <VeitSettingsSection title={t("deviceSection")}>
+          <div className="flex flex-col gap-4">
+            {device ? (
+              <DeviceSummary device={device} voices={voices} providers={providers} onClick={() => setEditing(device)} />
+            ) : (
+              <VeitEmptyState embedded title={t("noDeviceTitle")} description={t("noDeviceText")} />
+            )}
+            <div className={VEIT_SETTINGS_ACTIONS}>
+              <VeitButton onClick={() => setEditing("new")}>{t("addDevice")}</VeitButton>
+            </div>
+          </div>
+        </VeitSettingsSection>
+      )}
       {device && (
         <>
-          <VeitSettingsSection title={t("deviceSection")}>
-            <DeviceSummary device={device} voices={voices} providers={providers} onClick={() => setEditing(device)} />
-          </VeitSettingsSection>
           <ChatPanel key={device.id} deviceId={device.id} historyVersion={historyVersion} />
         </>
       )}
@@ -91,17 +97,13 @@ export function DevicesPage() {
         voices={voices}
         providers={providers}
         onClose={() => setEditing(null)}
-        onSaved={(saved) => {
-          setNotice(null);
-          void reload(saved.id);
-        }}
+        onSaved={(saved) => void reload(saved.id)}
         onDeleted={() => {
           setEditing(null);
           void reload();
         }}
-        onError={(text) => setNotice({ ok: false, text })}
         onHistoryCleared={() => setHistoryVersion((version) => version + 1)}
       />
-    </div>
+    </VeitPage>
   );
 }
