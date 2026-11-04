@@ -162,6 +162,10 @@ importers:
         version: 5.9.3
 
   veit-framework/packages/api-keys:
+    dependencies:
+      '@veit/secret-box':
+        specifier: workspace:*
+        version: link:../secret-box
     devDependencies:
       '@types/express':
         specifier: ^5.0.0
@@ -185,11 +189,39 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  veit-framework/packages/app-settings:
+    dependencies:
+      '@veit/secret-box':
+        specifier: workspace:*
+        version: link:../secret-box
+    devDependencies:
+      '@types/express':
+        specifier: ^5.0.0
+        version: 5.0.6
+      '@types/node':
+        specifier: ^22.10.5
+        version: 22.20.5
+      '@veit/auth-server':
+        specifier: workspace:*
+        version: link:../auth-server
+      express:
+        specifier: ^4.21.2
+        version: 4.22.3
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.15
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
   veit-framework/packages/auth-server:
     dependencies:
       '@veit/password-policy':
         specifier: workspace:*
         version: link:../password-policy
+      '@veit/secret-box':
+        specifier: workspace:*
+        version: link:../secret-box
       bcryptjs:
         specifier: ^3.0.2
         version: 3.0.3
@@ -372,6 +404,27 @@ importers:
       '@veit/react-account':
         specifier: workspace:*
         version: link:../react-account
+      '@veit/react-controls':
+        specifier: workspace:*
+        version: link:../react-controls
+      '@veit/react-dialog':
+        specifier: workspace:*
+        version: link:../react-dialog
+      lucide-react:
+        specifier: ^0.454.0
+        version: 0.454.0(react@19.3.1)
+      react:
+        specifier: ^19.0.0
+        version: 19.3.1
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  veit-framework/packages/react-app-settings:
+    devDependencies:
+      '@types/react':
+        specifier: ^19.0.2
+        version: 19.3.0
       '@veit/react-controls':
         specifier: workspace:*
         version: link:../react-controls
@@ -659,6 +712,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.0.2
         version: 19.3.0(@types/react@19.3.0)
+      '@veit/react-controls':
+        specifier: workspace:*
+        version: link:../react-controls
       lucide-react:
         specifier: ^0.454.0
         version: 0.454.0(react@19.3.1)
@@ -698,6 +754,21 @@ importers:
       react-dom:
         specifier: ^19.0.0
         version: 19.3.1(react@19.3.1)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  veit-framework/packages/secret-box:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.5
+        version: 22.20.5
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.23.1
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.15
       typescript:
         specifier: ^5.7.2
         version: 5.9.3

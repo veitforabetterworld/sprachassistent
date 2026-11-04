@@ -7,7 +7,7 @@
     "preinstall": "node scripts/only-pnpm.cjs",
     "prepare": "node scripts/install-git-hooks.mjs",
     "build": "pnpm -r --filter @sprachassistent/api --filter @sprachassistent/web run build",
-    "build:deps": "pnpm --filter @veit/db --filter @veit/auth-server --filter @veit/api-keys --filter @veit/password-policy --filter @veit/intl run build",
+    "build:deps": "pnpm --filter @veit/secret-box --filter @veit/app-settings --filter @veit/db --filter @veit/auth-server --filter @veit/api-keys --filter @veit/password-policy --filter @veit/intl run build",
     "typecheck": "node scripts/check-error-codes.mjs && pnpm -r --filter @sprachassistent/api --filter @sprachassistent/web run typecheck",
     "dev:api": "pnpm --filter @sprachassistent/api dev",
     "dev:web": "pnpm --filter @sprachassistent/web dev",
