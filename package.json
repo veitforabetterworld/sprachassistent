@@ -4,8 +4,8 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
-    "preinstall": "node scripts/only-pnpm.cjs",
-    "prepare": "node scripts/install-git-hooks.mjs",
+    "preinstall": "node veit-framework/scripts/only-pnpm.cjs",
+    "prepare": "node veit-framework/scripts/install-git-hooks.mjs",
     "build": "pnpm -r --filter @sprachassistent/api --filter @sprachassistent/web run build",
     "build:deps": "pnpm --filter @veit/secret-box --filter @veit/app-settings --filter @veit/db --filter @veit/auth-server --filter @veit/api-keys --filter @veit/password-policy --filter @veit/intl run build",
     "typecheck": "node scripts/check-error-codes.mjs && pnpm -r --filter @sprachassistent/api --filter @sprachassistent/web run typecheck",
@@ -14,7 +14,7 @@
     "lint": "pnpm -r --filter @sprachassistent/api --filter @sprachassistent/web run lint",
     "check:secrets": "node scripts/check-secrets.mjs",
     "check:submodules": "node veit-framework/scripts/check-submodule-pins.mjs --submodule veit-framework --branch development",
-    "check:audit": "node scripts/check-audit.mjs"
+    "check:audit": "node veit-framework/scripts/check-audit.mjs --allowlist scripts/audit-reviewed.json"
   },
   "engines": {
     "node": ">=22"

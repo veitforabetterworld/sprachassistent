@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "node scripts/no-custom-css.mjs && node scripts/check-page-loc.mjs && node scripts/check-i18n-hardcodes.mjs && node scripts/check-i18n-literals.mjs && node scripts/check-sheet-dismiss.mjs && tsc -b --noEmit",
+    "typecheck": "node scripts/no-custom-css.mjs && node ../../veit-framework/scripts/check-page-loc.mjs --root src/pages --warn 600 --fail 1000 && node ../../veit-framework/scripts/check-i18n-hardcodes.mjs && node ../../veit-framework/scripts/check-i18n-literals.mjs && node ../../veit-framework/scripts/check-sheet-dismiss.mjs && tsc -b --noEmit",
     "lint": "eslint src"
   },
   "dependencies": {
