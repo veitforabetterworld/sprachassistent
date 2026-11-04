@@ -171,11 +171,13 @@ impl Store {
     }
 
     /// The chatbot an API key may talk as. The key's user must own it. A key names one chatbot, so
-    /// `requested` is only needed when an older key still covers more than one.
+    /// `requested` is only needed when an older key still covers more than one. The pepper is stored
+    /// encrypted like the other secrets (apps/api, @veit/app-settings).
     pub async fn authenticate_device(
         &self,
         raw_key: &str,
         requested: Option<Uuid>,
+        secrets: &Secrets,
     ) -> Result<Device> {
         if !raw_key.starts_with(KEY_PREFIX) {
             return Err(failure("key.unknown", "unbekannter Schlüssel"));
@@ -184,7 +186,11 @@ impl Store {
             sqlx::query_as("SELECT value FROM app_settings WHERE key = 'api_key_pepper'")
                 .fetch_optional(&self.pool)
                 .await?;
-        let hash = hash_api_key(raw_key, pepper.map(|p| p.0).as_deref().unwrap_or(""));
+        let pepper = match pepper {
+            Some((stored,)) => secrets.decrypt(&stored)?,
+            None => String::new(),
+        };
+        let hash = hash_api_key(raw_key, &pepper);
         let key: Option<(i64, bool, Vec<String>)> = sqlx::query_as(
             "UPDATE user_api_keys SET last_used_at = NOW()
              WHERE key_hash = $1 AND revoked_at IS NULL AND $2 = ANY(permissions)

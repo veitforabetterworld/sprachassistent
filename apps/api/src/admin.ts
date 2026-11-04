@@ -1,5 +1,6 @@
 import express, { Router, type Request } from "express";
 import { z } from "zod";
+import { createAppSettingsRouter } from "@veit/app-settings/express";
 import { getAuthUser } from "@veit/auth-server/express";
 import {
   approveAccount,
@@ -13,8 +14,8 @@ import {
 import { pool } from "./db.js";
 import { handle, HttpError, parse, sendError, toVoice, toVoiceBuffer } from "./http.js";
 import { registerMcp } from "./mcp.js";
-import { openSecret, seal } from "./secrets.js";
-import { PASSWORD_SETTINGS, getSetting, listSettings, saveSettings } from "./settings.js";
+import { credentialsBox, openSecret } from "./secrets.js";
+import { ADMIN_SETTING_KEYS, appSettings } from "./settings.js";
 
 /** Signed-in area. Settings are admin-only. Providers, devices and tools belong to the session user. */
 
@@ -154,23 +155,14 @@ export function adminRouter(): Router {
     }),
   );
 
-  router.get(
+  // GET/PUT /settings and GET /settings/:key/secret (masked list, reveal of a stored password).
+  router.use(
     "/settings",
-    handle(async (_req, res) => res.json({ values: await listSettings() })),
-  );
-  router.put(
-    "/settings",
-    handle(async (req, res) => {
-      await saveSettings(parse(z.record(z.string(), z.string()), req.body?.values));
-      res.json({ values: await listSettings() });
-    }),
-  );
-  // A stored password, to show and copy it in the edit dialog.
-  router.get(
-    "/settings/:key/secret",
-    handle(async (req, res) => {
-      const key = parse(z.enum(PASSWORD_SETTINGS), req.params.key);
-      res.set("Cache-Control", "no-store").json({ value: (await getSetting(key)) ?? "" });
+    createAppSettingsRouter({
+      settings: appSettings,
+      keys: ADMIN_SETTING_KEYS,
+      // The admin check at the top of this router has run already.
+      guard: (_req, _res, next) => next(),
     }),
   );
 
@@ -195,7 +187,7 @@ export function adminRouter(): Router {
         `INSERT INTO llm_providers (user_id, name, base_url, api_key, model, enabled, priority, nudge_tools)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING id, name, base_url, model, enabled, priority, nudge_tools, api_key`,
-        [await ownerId(req), p.name, p.base_url, p.api_key ? seal(p.api_key) : "", p.model, p.enabled, p.priority, p.nudge_tools],
+        [await ownerId(req), p.name, p.base_url, credentialsBox.encrypt(p.api_key), p.model, p.enabled, p.priority, p.nudge_tools],
       );
       res.status(201).json(publicProvider(row.rows[0]));
     }),
@@ -211,7 +203,7 @@ export function adminRouter(): Router {
            model = $5, enabled = $6, priority = $7, nudge_tools = $8
          WHERE id = $1 AND user_id = $9
          RETURNING id, name, base_url, model, enabled, priority, nudge_tools, api_key`,
-        [id, p.name, p.base_url, p.api_key ? seal(p.api_key) : "", p.model, p.enabled, p.priority, p.nudge_tools, await ownerId(req)],
+        [id, p.name, p.base_url, credentialsBox.encrypt(p.api_key), p.model, p.enabled, p.priority, p.nudge_tools, await ownerId(req)],
       );
       if (!row.rows[0]) throw new HttpError(404, "provider.not_found");
       res.json(publicProvider(row.rows[0]));
@@ -238,7 +230,7 @@ export function adminRouter(): Router {
       );
       if (!row.rows[0]) throw new HttpError(404, "provider.not_found");
       const key = openSecret(row.rows[0].api_key);
-      if (row.rows[0].api_key.startsWith("enc1:") && !key) throw new HttpError(500, "secrets.key_missing");
+      if (row.rows[0].api_key !== "" && !key) throw new HttpError(500, "secrets.key_missing");
       res.set("Cache-Control", "no-store").json({ key });
     }),
   );

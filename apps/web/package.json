@@ -19,6 +19,7 @@
     "@veit/intl": "workspace:*",
     "@veit/react-account": "workspace:*",
     "@veit/react-api-keys": "workspace:*",
+    "@veit/react-app-settings": "workspace:*",
     "@veit/react-auth": "workspace:*",
     "@veit/react-controls": "workspace:*",
     "@veit/react-dialog": "workspace:*",

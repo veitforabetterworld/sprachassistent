@@ -6,7 +6,6 @@ import { adminRouter } from "./admin.js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import { pendingMigrations } from "./migrate.js";
-import { migratePlaintextSecrets } from "./settings.js";
 
 /**
  * Web API of the admin area. nginx sends /v1/talk and /v1/health to the Rust voice server and everything else
@@ -18,7 +17,6 @@ if (pending.length) {
   throw new Error(`Datenbank nicht migriert (${pending.join(", ")}): pnpm --filter @sprachassistent/api migrate`);
 }
 await ensureAccountSecrets();
-await migratePlaintextSecrets();
 
 const app = express();
 app.set("trust proxy", "loopback");

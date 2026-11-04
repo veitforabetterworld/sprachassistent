@@ -1,6 +1,7 @@
 import { createAuthProvider, createRestAuthClient, useAuth, veitFetchJson, type VeitWireUser } from "@veit/react-auth";
 import { createRestAccountClient } from "@veit/react-account";
 import { createRestApiKeysClient } from "@veit/react-api-keys";
+import { createRestAppSettingsClient } from "@veit/react-app-settings";
 import { formatLocalizedDateTime } from "@veit/intl";
 import { getActiveLocale } from "./i18n/locale";
 import { fetchAdminJson, readJson, type Failure } from "./errors";
@@ -11,6 +12,7 @@ export type AccountUser = VeitWireUser & { is_admin: boolean; verification_requi
 export const authClient = createRestAuthClient<AccountUser>("/v1", (wire) => wire as AccountUser);
 export const accountClient = createRestAccountClient("/v1", veitFetchJson, (iso) => formatLocalizedDateTime(getActiveLocale(), iso));
 export const apiKeysClient = createRestApiKeysClient("/v1", veitFetchJson);
+export const settingsClient = createRestAppSettingsClient("/v1/admin/settings", veitFetchJson);
 export const AuthProvider = createAuthProvider<AccountUser>(authClient);
 
 export function useAccount() {
@@ -117,11 +119,6 @@ export const adminApi = {
   approveUser: (id: string) => admin<AdminAccount>(`/users/${id}/approve`, "POST", {}),
   resetUserPassword: (id: string) => admin<{ ok: boolean }>(`/users/${id}/password-reset`, "POST", {}),
   deleteUser: (id: string) => admin<null>(`/users/${id}`, "DELETE"),
-
-  settings: async () => (await admin<{ values: Record<string, string | boolean> }>("/settings")).values,
-  settingSecret: async (key: string) => (await admin<{ value: string }>(`/settings/${key}/secret`)).value,
-  saveSettings: async (values: Record<string, string>) =>
-    (await admin<{ values: Record<string, string | boolean> }>("/settings", "PUT", { values })).values,
 
   providers: async () => (await admin<{ providers: Provider[] }>("/providers")).providers,
   createProvider: (input: ProviderInput) => admin<Provider>("/providers", "POST", input),

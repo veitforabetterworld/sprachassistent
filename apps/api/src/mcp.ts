@@ -4,7 +4,7 @@ import { getAuthUser } from "@veit/auth-server/express";
 import { pool } from "./db.js";
 import { handle, HttpError, parse, toVoice } from "./http.js";
 import { finishOAuth, startOAuth } from "./oauth.js";
-import { seal } from "./secrets.js";
+import { credentialsBox } from "./secrets.js";
 
 /** MCP servers and built-in tool policies of the signed-in user. The voice server discovers and calls them. */
 
@@ -80,7 +80,7 @@ export function registerMcp(router: Router): void {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id, name, preset, transport, url, command, enabled, auth_type,
                    secret_enc <> '' AS secret_set, oauth_enc <> '' AS oauth_set, status, last_error, last_error_detail, last_ok_at`,
-        [id, body.name, body.preset, body.transport, url, body.command, body.enabled, auth, body.secret ? seal(body.secret) : ""],
+        [id, body.name, body.preset, body.transport, url, body.command, body.enabled, auth, credentialsBox.encrypt(body.secret)],
       );
       res.status(201).json(row.rows[0]);
     }),
@@ -108,7 +108,7 @@ export function registerMcp(router: Router): void {
           body.command,
           body.enabled,
           body.auth_type,
-          body.secret ? seal(body.secret) : "",
+          credentialsBox.encrypt(body.secret),
         ],
       );
       if (!row.rows[0]) throw new HttpError(404, "mcp.not_found");

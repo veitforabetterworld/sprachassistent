@@ -1,6 +1,7 @@
 //! AES-256-GCM for tokens and provider keys. Same layout as the Node helper in `apps/api/src/secrets.ts`:
 //! `enc1:` plus base64 of `{"iv","tag","d"}`. The key is sha256(`${CREDENTIALS_KEY}|sprachassistent-credentials`).
-//! Values without the prefix are still plain text, so a database from before the key keeps working.
+//! apps/api converted stored plain text once (secretsMigration.ts) and writes only `enc1:`; a value without
+//! the prefix is still read as plain text, which the migration leaves nowhere.
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};

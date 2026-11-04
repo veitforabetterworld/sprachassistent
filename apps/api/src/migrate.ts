@@ -5,6 +5,7 @@ import { API_KEYS_SCHEMA_SQL } from "@veit/api-keys/pg";
 import { AUTH_SCHEMA_SQL } from "@veit/auth-server/pg";
 import { pool } from "./db.js";
 import { ROOT } from "./env.js";
+import { SECRETS_MIGRATION, migrateSecrets } from "./secretsMigration.js";
 
 /**
  * The one place that changes the database: at deploy (deployments/pi/runtime-reload.sh), before the servers
@@ -13,6 +14,9 @@ import { ROOT } from "./env.js";
  * db/migrations/NNNN_name.sql run once each, in name order, and are recorded in schema_migrations. A
  * migration that has run is never edited; a change gets a new file. The account tables belong to the
  * framework, which keeps its own SQL idempotent, so it runs first every time.
+ *
+ * Data migrations in code run after the files, in the same transaction, and are recorded the same way under
+ * their own name (secretsMigration.ts: SECRETS_MIGRATION).
  */
 
 const MIGRATIONS = resolve(ROOT, "db/migrations");
@@ -44,6 +48,11 @@ export async function migrate(): Promise<string[]> {
       await client.query(`INSERT INTO schema_migrations (name) VALUES ($1)`, [name]);
       applied.push(name);
     }
+    if (!done.has(SECRETS_MIGRATION)) {
+      await migrateSecrets(client);
+      await client.query(`INSERT INTO schema_migrations (name) VALUES ($1)`, [SECRETS_MIGRATION]);
+      applied.push(SECRETS_MIGRATION);
+    }
     await client.query("COMMIT");
     return applied;
   } catch (error) {
@@ -57,9 +66,10 @@ export async function migrate(): Promise<string[]> {
 /** Migrations the database has not seen; the server refuses to start with any. */
 export async function pendingMigrations(): Promise<string[]> {
   const table = await pool.query<{ exists: string | null }>(`SELECT to_regclass('schema_migrations') AS exists`);
-  if (!table.rows[0]?.exists) return migrationNames();
+  const names = [...migrationNames(), SECRETS_MIGRATION];
+  if (!table.rows[0]?.exists) return names;
   const done = new Set((await pool.query<{ name: string }>(`SELECT name FROM schema_migrations`)).rows.map((r) => r.name));
-  return migrationNames().filter((name) => !done.has(name));
+  return names.filter((name) => !done.has(name));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

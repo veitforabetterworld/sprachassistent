@@ -1,14 +1,17 @@
 import type { Request } from "express";
-import { AuthService, authFail, createAesGcmSecretBox, isAuthError, type AuthMailer, type RequestInfo, type UserId } from "@veit/auth-server";
+import { AuthService, authFail, isAuthError, type AuthMailer, type RequestInfo, type UserId } from "@veit/auth-server";
 import { createExpressAuth, getAuthUser } from "@veit/auth-server/express";
 import { createPgAuthStore } from "@veit/auth-server/pg";
 import { createSmtpMailer, germanMailTexts } from "@veit/auth-server/smtp";
+import { smtpSettingsFromAppSettings } from "@veit/app-settings/smtp";
+import { createSecretBox } from "@veit/secret-box";
 import { ApiKeyError, ApiKeyService, type ApiKeyInput } from "@veit/api-keys";
 import { createExpressApiKeys } from "@veit/api-keys/express";
 import { createPgApiKeyStore } from "@veit/api-keys/pg";
 import { pool } from "./db.js";
 import { HttpError } from "./http.js";
-import { ensureSecret, getSetting, setSetting } from "./settings.js";
+import { MFA_TOTP_CONTEXT } from "./secrets.js";
+import { appSettings } from "./settings.js";
 
 /**
  * Accounts (veit-framework: @veit/auth-server, @veit/api-keys).
@@ -26,22 +29,9 @@ let pepper = "";
 let keySecret = "";
 
 export async function ensureAccountSecrets(): Promise<void> {
-  mfaKey = await ensureSecret("auth_mfa_key");
-  pepper = await ensureSecret("api_key_pepper");
-  keySecret = await ensureSecret("api_key_secret");
-}
-
-async function smtpSettings() {
-  const host = (await getSetting("smtp_host")) ?? "";
-  if (!host) return null;
-  return {
-    host,
-    port: Number((await getSetting("smtp_port")) ?? "587") || 587,
-    secure: (await getSetting("smtp_secure")) === "1",
-    user: (await getSetting("smtp_user")) ?? "",
-    password: (await getSetting("smtp_password")) ?? "",
-    from: (await getSetting("smtp_from")) ?? "",
-  };
+  mfaKey = await appSettings.ensureGenerated("auth_mfa_key");
+  pepper = await appSettings.ensureGenerated("api_key_pepper");
+  keySecret = await appSettings.ensureGenerated("api_key_secret");
 }
 
 export async function isAdmin(userId: UserId): Promise<boolean> {
@@ -51,14 +41,14 @@ export async function isAdmin(userId: UserId): Promise<boolean> {
 
 /** On: a new account must confirm its address before it can use the app. Off when no SMTP is set up. */
 export async function verificationRequired(): Promise<boolean> {
-  return (await getSetting("account_verification")) === "1";
+  return (await appSettings.get("account_verification")) === "1";
 }
 
 export async function setVerificationRequired(on: boolean): Promise<void> {
-  await setSetting("account_verification", on ? "1" : "0");
+  await appSettings.set("account_verification", on ? "1" : "0");
 }
 
-const smtpMailer = createSmtpMailer(smtpSettings, germanMailTexts("Sprachassistent"));
+const smtpMailer = createSmtpMailer(smtpSettingsFromAppSettings(appSettings), germanMailTexts("Sprachassistent"));
 const mailer: AuthMailer = {
   ...smtpMailer,
   sendVerification: async (input) => {
@@ -70,7 +60,7 @@ const mailer: AuthMailer = {
 export const authService = new AuthService({
   store: createPgAuthStore(pool),
   mailer,
-  secretBox: createAesGcmSecretBox(() => mfaKey, "sprachassistent-mfa-totp"),
+  secretBox: createSecretBox({ key: () => mfaKey, context: MFA_TOTP_CONTEXT }),
   totpIssuer: "Sprachassistent",
   // Pages of apps/web.
   verifyEmailUrl: (token, origin) => `${origin}/e-mail-bestaetigen?token=${encodeURIComponent(token)}`,

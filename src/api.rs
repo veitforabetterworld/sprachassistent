@@ -329,7 +329,7 @@ async fn talk(
     let device = state
         .assistant
         .store
-        .authenticate_device(device_key(&headers), q.device)
+        .authenticate_device(device_key(&headers), q.device, &state.assistant.secrets)
         .await
         .map_err(|e| ApiError::of(StatusCode::UNAUTHORIZED, e))?;
     let tts = voice_of(&state, &device).await?;

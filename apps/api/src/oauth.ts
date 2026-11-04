@@ -4,8 +4,8 @@ import type { UserId } from "@veit/auth-server";
 import { getAuthUser } from "@veit/auth-server/express";
 import { pool } from "./db.js";
 import { HttpError } from "./http.js";
-import { getSetting } from "./settings.js";
-import { seal } from "./secrets.js";
+import { credentialsBox } from "./secrets.js";
+import { appSettings } from "./settings.js";
 
 /** Browser OAuth for the official Google MCP servers. The voice server only refreshes the stored token. */
 
@@ -34,8 +34,8 @@ export async function startOAuth(req: Request, res: Response, userId: UserId, se
   if (!server) throw new HttpError(404, "mcp.not_found");
   const scope = SCOPES[server.preset];
   if (!scope) throw new HttpError(400, "mcp.not_oauth");
-  const clientId = (await getSetting("google_oauth_client_id")) ?? "";
-  if (!clientId || !(await getSetting("google_oauth_client_secret"))) {
+  const clientId = (await appSettings.get("google_oauth_client_id")) ?? "";
+  if (!clientId || !(await appSettings.get("google_oauth_client_secret"))) {
     throw new HttpError(400, "mcp.oauth_not_configured");
   }
   const state = randomBytes(24).toString("base64url");
@@ -73,8 +73,8 @@ export async function finishOAuth(req: Request, res: Response): Promise<void> {
     back("oauth=error");
     return;
   }
-  const clientId = (await getSetting("google_oauth_client_id")) ?? "";
-  const clientSecret = (await getSetting("google_oauth_client_secret")) ?? "";
+  const clientId = (await appSettings.get("google_oauth_client_id")) ?? "";
+  const clientSecret = (await appSettings.get("google_oauth_client_secret")) ?? "";
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
@@ -103,7 +103,7 @@ export async function finishOAuth(req: Request, res: Response): Promise<void> {
   });
   await pool.query(`UPDATE mcp_servers SET oauth_enc = $2, auth_type = 'oauth', status = 'unknown', last_error = '', last_error_detail = '' WHERE id = $1 AND user_id = $3`, [
     row.server_id,
-    seal(blob),
+    credentialsBox.encrypt(blob),
     user.id,
   ]);
   back("oauth=ok");

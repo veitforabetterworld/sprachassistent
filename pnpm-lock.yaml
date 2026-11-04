@@ -29,12 +29,18 @@ importers:
       '@veit/api-keys':
         specifier: workspace:*
         version: link:../../veit-framework/packages/api-keys
+      '@veit/app-settings':
+        specifier: workspace:*
+        version: link:../../veit-framework/packages/app-settings
       '@veit/auth-server':
         specifier: workspace:*
         version: link:../../veit-framework/packages/auth-server
       '@veit/db':
         specifier: workspace:*
         version: link:../../veit-framework/packages/db
+      '@veit/secret-box':
+        specifier: workspace:*
+        version: link:../../veit-framework/packages/secret-box
       express:
         specifier: ^4.21.2
         version: 4.22.3
@@ -99,6 +105,9 @@ importers:
       '@veit/react-api-keys':
         specifier: workspace:*
         version: link:../../veit-framework/packages/react-api-keys
+      '@veit/react-app-settings':
+        specifier: workspace:*
+        version: link:../../veit-framework/packages/react-app-settings
       '@veit/react-auth':
         specifier: workspace:*
         version: link:../../veit-framework/packages/react-auth

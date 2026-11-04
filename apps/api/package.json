@@ -14,8 +14,10 @@
   },
   "dependencies": {
     "@veit/api-keys": "workspace:*",
+    "@veit/app-settings": "workspace:*",
     "@veit/auth-server": "workspace:*",
     "@veit/db": "workspace:*",
+    "@veit/secret-box": "workspace:*",
     "express": "^4.21.2",
     "helmet": "^8.1.0",
     "nodemailer": "^10.3.1",

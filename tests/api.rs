@@ -25,6 +25,8 @@ use sprachassistent::store::{hash_api_key, migration_names, Store};
 use sprachassistent::tools::{EmptyTools, ToolExecutor, ToolHints, ToolOffer};
 
 const PEPPER: &str = "test-pepper";
+/// CREDENTIALS_KEY of the tests; apps/api stores the pepper encrypted with it.
+const CREDENTIALS: &str = "test-credentials";
 const VOICE: &str = "vits-piper-de_DE-test-medium";
 
 #[derive(Default)]
@@ -226,7 +228,7 @@ async fn test_database() -> Option<String> {
                     .unwrap_or_else(|e| panic!("{name}: {e}"));
             }
             sqlx::query("INSERT INTO app_settings (key, value) VALUES ('api_key_pepper', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
-                .bind(PEPPER)
+                .bind(Secrets::new(CREDENTIALS).encrypt(PEPPER).unwrap())
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -247,7 +249,7 @@ async fn setup() -> Option<Setup> {
             llm: llm.clone(),
             store: store.clone(),
             tools: Arc::new(EmptyTools),
-            secrets: Secrets::new(""),
+            secrets: Secrets::new(CREDENTIALS),
         }),
         stt: Some(Arc::new(FakeStt)),
         voices: Arc::new(FakeVoices),
@@ -593,7 +595,7 @@ async fn named_tool_setup(
             llm: llm.clone(),
             store: s.store.clone(),
             tools: tools.clone(),
-            secrets: Secrets::new(""),
+            secrets: Secrets::new(CREDENTIALS),
         }),
         stt: Some(Arc::new(FakeStt)),
         voices: Arc::new(FakeVoices),
