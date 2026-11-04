@@ -62,7 +62,6 @@ const CODE_KEY: Record<string, MessageKey> = {
   "mcp.oauth_not_connected": "errMcpOauthNotConnected",
   "mcp.oauth_not_configured": "errMcpOauthNotConfigured",
   "mcp.oauth_refresh_failed": "errMcpOauthRefreshFailed",
-  "api_keys.one_device": "keysOneDevice",
 };
 
 /** Field names of the forms as the server reports them. Unknown ones are shown as they are. */

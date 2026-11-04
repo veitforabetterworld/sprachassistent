@@ -14,6 +14,8 @@ export const accountClient = createRestAccountClient("/v1", veitFetchJson, (iso)
 export const apiKeysClient = createRestApiKeysClient("/v1", veitFetchJson);
 export const settingsClient = createRestAppSettingsClient("/v1/admin/settings", veitFetchJson);
 export const AuthProvider = createAuthProvider<AccountUser>(authClient);
+/** The one permission of a chatbot key (apps/api accounts.ts). */
+export const DEVICE_TALK = "device.talk";
 
 export function useAccount() {
   return useAuth<AccountUser>();
