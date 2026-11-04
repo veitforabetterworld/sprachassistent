@@ -12,6 +12,7 @@ const sources = [
   "../../../veit-framework/packages/react-auth/src",
   "../../../veit-framework/packages/react-account/src",
   "../../../veit-framework/packages/react-api-keys/src",
+  "../../../veit-framework/packages/react-app-settings/src",
 ].flatMap((glob) => ["--source", glob]);
 const controls = join(here, "../../../veit-framework/packages/react-account/src");
 const result = spawnSync(process.execPath, [runner, join(here, "../src"), "--controls", controls, ...sources], { stdio: "inherit" });

@@ -4,7 +4,7 @@ import { createRestApiKeysClient } from "@veit/react-api-keys";
 import { createRestAppSettingsClient } from "@veit/react-app-settings";
 import { formatLocalizedDateTime } from "@veit/intl";
 import { getActiveLocale } from "./i18n/locale";
-import { fetchAdminJson, readJson, type Failure } from "./errors";
+import { readJson, type Failure } from "./errors";
 
 /** Signed-in user as apps/api sends it (@veit/auth-server) plus the admin flag. */
 export type AccountUser = VeitWireUser & { is_admin: boolean; verification_required: boolean };
@@ -23,7 +23,7 @@ export function useAccount() {
 
 export { errorDetail, errorText, codeText, type Failure } from "./errors";
 
-const admin = <T>(path: string, method = "GET", body?: unknown) => fetchAdminJson<T>(`/v1/admin${path}`, { method, body });
+const admin = <T>(path: string, method = "GET", body?: unknown) => veitFetchJson<T>(`/v1/admin${path}`, { method, body });
 
 export type Device = {
   id: string;

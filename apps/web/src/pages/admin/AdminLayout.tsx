@@ -1,26 +1,31 @@
-import { Navigate, Outlet, useLocation } from "react-router-dom";
+import type { ReactNode } from "react";
+import { Outlet } from "react-router-dom";
+import { ProtectedRoute } from "@veit/react-auth";
 import { AppShell, VeitSpinner } from "@veit/react-controls";
-import { useAccount } from "../../api";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Layout } from "../Layout";
 
-export function AdminLayout() {
-  const location = useLocation();
+/** Signed-in pages; without a session to the login, which returns here afterwards (router state). */
+export function SignedIn({ children }: { children: ReactNode }) {
   const { t } = useI18n();
-  const { user, loading } = useAccount();
-
-  if (loading) {
-    return (
-      <AppShell variant="center">
-        <VeitSpinner size="lg" label={t("loading")} />
-      </AppShell>
-    );
-  }
-  if (!user) return <Navigate to={`/anmelden?next=${encodeURIComponent(location.pathname)}`} replace />;
-
   return (
-    <Layout>
+    <ProtectedRoute
+      loginPath="/anmelden"
+      loadingFallback={
+        <AppShell variant="center">
+          <VeitSpinner size="lg" label={t("loading")} />
+        </AppShell>
+      }
+    >
+      <Layout>{children}</Layout>
+    </ProtectedRoute>
+  );
+}
+
+export function AdminLayout() {
+  return (
+    <SignedIn>
       <Outlet />
-    </Layout>
+    </SignedIn>
   );
 }

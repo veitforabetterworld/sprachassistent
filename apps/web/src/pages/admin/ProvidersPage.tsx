@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
-import { ChevronRight, GripVertical, Loader2 } from "lucide-react";
+import { ChevronRight, GripVertical } from "lucide-react";
 import {
+  VEIT_SETTINGS_ACTIONS,
+  VeitAlert,
   VeitButton,
   VeitField,
   VeitInput,
@@ -9,7 +11,9 @@ import {
   VeitSecretField,
   VeitSelect,
   VeitSettingsSection,
+  VeitPage,
   VeitSettingsToggleRow,
+  VeitSpinner,
   VeitStatusBadge,
 } from "@veit/react-controls";
 import { VeitOverlayEditDialog, useDialogFormBaseline, useManagedOverlayDialogBinding } from "@veit/react-dialog";
@@ -257,7 +261,7 @@ function ProviderEditDialog({
           <div className="flex flex-col items-start gap-2">
             <div className="flex flex-wrap gap-2">
               <VeitButton variant="secondary" disabled={saving || testing || !ready} onClick={() => void test(false)}>
-                {testing && <Loader2 className="size-4 animate-spin" aria-hidden />}
+                {testing && <VeitSpinner size="sm" />}
                 {t("test")}
               </VeitButton>
               <VeitButton variant="secondary" disabled={saving || testing || !ready} onClick={() => void test(true)}>
@@ -265,18 +269,12 @@ function ProviderEditDialog({
               </VeitButton>
             </div>
             {testResult && (
-              <VeitStatusBadge variant={testResult.ok ? "success" : "destructive"} shape="rounded">
-                {testResult.text}
-              </VeitStatusBadge>
+              <VeitAlert variant={testResult.ok ? "success" : "error"}>{testResult.text}</VeitAlert>
             )}
             <ErrorDetails detail={testResult?.detail} />
           </div>
         </VeitField>
-        {error && (
-          <VeitStatusBadge variant="destructive" shape="rounded">
-            {error}
-          </VeitStatusBadge>
-        )}
+        {error && <VeitAlert>{error}</VeitAlert>}
       </div>
     </VeitOverlayEditDialog>
   );
@@ -373,39 +371,33 @@ export function ProvidersPage() {
   const nextPriority = (providers?.reduce((max, provider) => Math.max(max, provider.priority), 0) ?? 0) + 10;
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4 sm:p-6">
-      {notice && (
-        <VeitStatusBadge variant="destructive" shape="rounded">
-          {notice}
-        </VeitStatusBadge>
-      )}
-      <VeitSettingsSection
-        title={t("providersTitle")}
-        actions={
-          <VeitButton variant="secondary" onClick={() => setEditing("new")}>
-            {t("add")}
-          </VeitButton>
-        }
-      >
-        <VeitSortableVerticalList
-          sortableIds={providers?.map((provider) => provider.id) ?? []}
-          onDragEnd={(event) => {
-            if (!event.over) return;
-            void reorder(String(event.active.id), String(event.over.id));
-          }}
-          sortableChildren={
-            <VeitList>
-              {providers?.map((provider) => (
-                <ProviderRow
-                  key={provider.id}
-                  provider={provider}
-                  dragDisabled={(providers?.length ?? 0) < 2}
-                  onClick={() => setEditing(provider)}
-                />
-              ))}
-            </VeitList>
-          }
-        />
+    <VeitPage width="narrow">
+      {notice && <VeitAlert>{notice}</VeitAlert>}
+      <VeitSettingsSection title={t("providersTitle")}>
+        <div className="flex flex-col gap-4">
+          <VeitSortableVerticalList
+            sortableIds={providers?.map((provider) => provider.id) ?? []}
+            onDragEnd={(event) => {
+              if (!event.over) return;
+              void reorder(String(event.active.id), String(event.over.id));
+            }}
+            sortableChildren={
+              <VeitList>
+                {providers?.map((provider) => (
+                  <ProviderRow
+                    key={provider.id}
+                    provider={provider}
+                    dragDisabled={(providers?.length ?? 0) < 2}
+                    onClick={() => setEditing(provider)}
+                  />
+                ))}
+              </VeitList>
+            }
+          />
+          <div className={VEIT_SETTINGS_ACTIONS}>
+            <VeitButton onClick={() => setEditing("new")}>{t("add")}</VeitButton>
+          </div>
+        </div>
       </VeitSettingsSection>
       <ProviderEditDialog
         open={editing !== null}
@@ -417,6 +409,6 @@ export function ProvidersPage() {
           reload();
         }}
       />
-    </div>
+    </VeitPage>
   );
 }

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { ChevronRight } from "lucide-react";
 import {
+  VEIT_SETTINGS_ACTIONS,
+  VeitAlert,
   VeitButton,
   VeitEmptyState,
   VeitField,
@@ -10,6 +12,7 @@ import {
   VeitListItem,
   VeitSecretField,
   VeitSelect,
+  VeitPage,
   VeitSettingsSection,
   VeitSettingsToggleRow,
   VeitStatusBadge,
@@ -176,11 +179,7 @@ function McpEditDialog({
         )}
         {draft.transport === "stdio" && <p className="m-0 text-sm text-muted-foreground">{t("mcpStdio")}</p>}
         <VeitSettingsToggleRow variant="embed" label={t("mcpEnabled")} checked={draft.enabled} disabled={saving} onCheckedChange={(v) => set("enabled", v)} />
-        {error && (
-          <VeitStatusBadge variant="destructive" shape="rounded">
-            {error}
-          </VeitStatusBadge>
-        )}
+        {error && <VeitAlert>{error}</VeitAlert>}
       </div>
     </VeitOverlayEditDialog>
   );
@@ -315,9 +314,7 @@ function ToolsDialog({
         <div className="flex flex-col gap-4">
           <p className="m-0 text-sm text-muted-foreground">{tf(count === 1 ? "mcpToolCountOne" : "mcpToolCount", { count })}</p>
           {server.last_error && (
-            <VeitStatusBadge variant="destructive" shape="rounded">
-              {codeText(server.last_error)}
-            </VeitStatusBadge>
+            <VeitAlert>{codeText(server.last_error)}</VeitAlert>
           )}
           <ErrorDetails detail={server.last_error_detail} />
           <div className="flex flex-wrap gap-2">
@@ -454,45 +451,41 @@ export function McpPage() {
   const chevron = <ChevronRight className="size-4 text-muted-foreground" aria-hidden />;
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4 sm:p-6">
-      {notice && (
-        <VeitStatusBadge variant="neutral" shape="rounded">
-          {notice}
-        </VeitStatusBadge>
-      )}
+    <VeitPage width="narrow">
+      {notice && <VeitAlert variant="info">{notice}</VeitAlert>}
       <VeitSettingsSection
         title={t("mcpTitle")}
         description={t("mcpHint")}
-        actions={
-          <VeitButton variant="secondary" onClick={() => setEditing("new")}>
-            {t("mcpAdd")}
-          </VeitButton>
-        }
       >
-        {servers.length === 0 ? (
-          <VeitEmptyState embedded title={t("mcpEmpty")} />
-        ) : (
-          <VeitList>
-            {servers.map((server) => {
-              const count = tools.filter((tool) => tool.server_id === server.id && tool.present).length;
-              const countLabel = tf(count === 1 ? "mcpToolCountOne" : "mcpToolCount", { count });
-              return (
-                <VeitListItem
-                  key={server.id}
-                  title={server.name}
-                  meta={refreshing && count === 0 ? t("mcpLoading") : countLabel}
-                  badge={
-                    <VeitStatusBadge variant={server.last_error ? "destructive" : server.enabled ? "success" : "inactive"}>
-                      {server.last_error ? t("error") : tf("mcpStatus", { status: server.status })}
-                    </VeitStatusBadge>
-                  }
-                  trailing={chevron}
-                  onClick={() => setBrowsingId(server.id)}
-                />
-              );
-            })}
-          </VeitList>
-        )}
+        <div className="flex flex-col gap-4">
+          {servers.length === 0 ? (
+            <VeitEmptyState embedded title={t("mcpEmpty")} />
+          ) : (
+            <VeitList>
+              {servers.map((server) => {
+                const count = tools.filter((tool) => tool.server_id === server.id && tool.present).length;
+                const countLabel = tf(count === 1 ? "mcpToolCountOne" : "mcpToolCount", { count });
+                return (
+                  <VeitListItem
+                    key={server.id}
+                    title={server.name}
+                    meta={refreshing && count === 0 ? t("mcpLoading") : countLabel}
+                    badge={
+                      <VeitStatusBadge variant={server.last_error ? "destructive" : server.enabled ? "success" : "inactive"}>
+                        {server.last_error ? t("error") : tf("mcpStatus", { status: server.status })}
+                      </VeitStatusBadge>
+                    }
+                    trailing={chevron}
+                    onClick={() => setBrowsingId(server.id)}
+                  />
+                );
+              })}
+            </VeitList>
+          )}
+          <div className={VEIT_SETTINGS_ACTIONS}>
+            <VeitButton onClick={() => setEditing("new")}>{t("mcpAdd")}</VeitButton>
+          </div>
+        </div>
       </VeitSettingsSection>
       <VeitSettingsSection title={t("nativeTitle")}>
         <VeitList>
@@ -529,6 +522,6 @@ export function McpPage() {
           })();
         }}
       />
-    </div>
+    </VeitPage>
   );
 }

@@ -3,18 +3,6 @@ import type { MessageKey } from "./i18n/de";
 import { getActiveLocale } from "./i18n/locale";
 import { tr, trFormat } from "./i18n/translate";
 
-/** An answer of apps/api or the voice server: `{ code, detail?, fields? }`, see apps/api/src/http.ts. */
-export class AdminApiError extends VeitApiError {
-  constructor(
-    status: number,
-    code: string,
-    readonly detail: string,
-    readonly fields: string[],
-  ) {
-    super(status, code);
-  }
-}
-
 /** The result of a test against a model or a tool server; `detail` is what the other side said. */
 export type Failure = { code: string; detail?: string };
 
@@ -94,7 +82,7 @@ export function codeText(code: string): string {
 
 /** A readable sentence for anything a request can throw; never the raw code or a stack. */
 export function errorText(error: unknown): string {
-  if (error instanceof AdminApiError && error.code === "validation" && error.fields.length > 0) {
+  if (error instanceof VeitApiError && error.code === "validation" && error.fields?.length) {
     const fields = error.fields.map((field) => (FIELD_KEY[field] ? tr(FIELD_KEY[field]) : field));
     return trFormat("errValidationFields", { fields: fields.join(", ") });
   }
@@ -114,40 +102,27 @@ export function micErrorText(error: unknown): string {
 
 /** The technical detail behind an error, for the "Details" line; empty when there is none. */
 export function errorDetail(error: unknown): string {
-  return error instanceof AdminApiError ? error.detail : "";
+  return error instanceof VeitApiError ? (error.detail ?? "") : "";
 }
 
-/** JSON request to the admin API; failures become AdminApiError with code and detail. */
-export async function fetchAdminJson<T>(url: string, init?: { method?: string; body?: unknown }): Promise<T> {
-  const res = await fetch(url, {
-    method: init?.method ?? "GET",
-    credentials: "include",
-    headers: init?.body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: init?.body === undefined ? undefined : JSON.stringify(init.body),
-  });
-  return readJson<T>(res);
-}
-
-function parseBody(text: string): { code?: unknown; detail?: unknown; fields?: unknown } | null {
-  if (!text) return null;
-  try {
-    return JSON.parse(text) as { code?: unknown; detail?: unknown; fields?: unknown };
-  } catch {
-    return null;
-  }
-}
-
-/** The JSON body of an answer, or AdminApiError for a status outside 2xx. */
+/**
+ * The JSON body of a raw fetch answer (audio up- and downloads, which veitFetchJson does not send), or VeitApiError
+ * with code, detail and fields for a status outside 2xx, like veitFetchJson.
+ */
 export async function readJson<T>(res: Response): Promise<T> {
   const text = await res.text();
-  const body = parseBody(text);
+  type Body = { code?: unknown; detail?: unknown; fields?: unknown };
+  let body: Body | null = null;
+  try {
+    body = text ? (JSON.parse(text) as Body) : null;
+  } catch {
+    body = null;
+  }
   if (!res.ok) {
-    throw new AdminApiError(
-      res.status,
-      typeof body?.code === "string" ? body.code : `http_${res.status}`,
-      typeof body?.detail === "string" ? body.detail : "",
-      Array.isArray(body?.fields) ? body.fields.map(String) : [],
-    );
+    throw new VeitApiError(res.status, typeof body?.code === "string" ? body.code : `http_${res.status}`, [], {
+      detail: typeof body?.detail === "string" ? body.detail : undefined,
+      fields: Array.isArray(body?.fields) ? body.fields.map(String) : undefined,
+    });
   }
   return body as T;
 }

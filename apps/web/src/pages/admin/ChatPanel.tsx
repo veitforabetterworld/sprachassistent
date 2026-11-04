@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUp, ChevronRight, Loader2, Mic, Square, Volume2 } from "lucide-react";
-import { VeitButton, VeitInput, VeitScrollArea } from "@veit/react-controls";
+import { ArrowUp, ChevronRight, Mic, Square, Volume2 } from "lucide-react";
+import { VeitAlert, VeitButton, VeitInput, VeitScrollArea, VeitSpinner } from "@veit/react-controls";
 import { adminApi, errorText, speakUrl, transcribe, type Message, type ToolCallMeta } from "../../api";
 import { micErrorText } from "../../errors";
 import { useI18n } from "../../i18n/I18nProvider";
@@ -316,7 +316,7 @@ export function ChatPanel({ deviceId, historyVersion = 0 }: { deviceId: string; 
                   {playing?.id !== turn.reply.id ? (
                     <Volume2 className="size-4" aria-hidden />
                   ) : playing.loading ? (
-                    <Loader2 className="size-4 animate-spin" aria-hidden />
+                    <VeitSpinner size="sm" />
                   ) : (
                     <Square className="size-4" aria-hidden />
                   )}
@@ -335,7 +335,7 @@ export function ChatPanel({ deviceId, historyVersion = 0 }: { deviceId: string; 
       </div>
       </VeitScrollArea>
       )}
-      {notice && <p className="m-0 text-sm text-destructive">{notice}</p>}
+      {notice && <VeitAlert plain>{notice}</VeitAlert>}
       <form
         className="flex items-center gap-2 rounded-full border border-border bg-muted/40 px-3 py-1.5"
         onSubmit={(event) => {
