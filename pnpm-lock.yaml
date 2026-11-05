@@ -225,6 +225,9 @@ importers:
 
   veit-framework/packages/auth-server:
     dependencies:
+      '@veit/intl':
+        specifier: workspace:*
+        version: link:../intl
       '@veit/password-policy':
         specifier: workspace:*
         version: link:../password-policy
@@ -296,6 +299,12 @@ importers:
 
   veit-framework/packages/intl:
     devDependencies:
+      '@types/node':
+        specifier: ^22.10.5
+        version: 22.20.5
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.15
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
@@ -367,6 +376,10 @@ importers:
         version: 5.9.3
 
   veit-framework/packages/react-account:
+    dependencies:
+      '@veit/intl':
+        specifier: workspace:*
+        version: link:../intl
     devDependencies:
       '@types/react':
         specifier: ^19.0.2
@@ -374,6 +387,12 @@ importers:
       '@veit/react-controls':
         specifier: workspace:*
         version: link:../react-controls
+      '@veit/react-dialog':
+        specifier: workspace:*
+        version: link:../react-dialog
+      lucide-react:
+        specifier: ^0.454.0
+        version: 0.454.0(react@19.3.1)
       qrcode.react:
         specifier: ^4.2.0
         version: 4.2.0(react@19.3.1)
@@ -451,6 +470,10 @@ importers:
         version: 5.9.3
 
   veit-framework/packages/react-auth:
+    dependencies:
+      '@veit/password-policy':
+        specifier: workspace:*
+        version: link:../password-policy
     devDependencies:
       '@types/react':
         specifier: ^19.0.2
