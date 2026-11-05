@@ -2,7 +2,7 @@ import type { Request } from "express";
 import { AuthService, authFail, isAuthError, type AuthMailer, type RequestInfo, type UserId } from "@veit/auth-server";
 import { createExpressAuth, getAuthUser } from "@veit/auth-server/express";
 import { createPgAuthStore } from "@veit/auth-server/pg";
-import { createSmtpMailer, germanMailTexts } from "@veit/auth-server/smtp";
+import { createSmtpMailer, createSmtpSender, germanMailTexts } from "@veit/auth-server/smtp";
 import { smtpSettingsFromAppSettings } from "@veit/app-settings/smtp";
 import { createSecretBox } from "@veit/secret-box";
 import { ApiKeyError, ApiKeyService, type ApiKeyInput } from "@veit/api-keys";
@@ -48,7 +48,27 @@ export async function setVerificationRequired(on: boolean): Promise<void> {
   await appSettings.set("account_verification", on ? "1" : "0");
 }
 
-const smtpMailer = createSmtpMailer(smtpSettingsFromAppSettings(appSettings), germanMailTexts("Sprachassistent"));
+const smtpSettings = smtpSettingsFromAppSettings(appSettings);
+const smtpMailer = createSmtpMailer(smtpSettings, germanMailTexts("Sprachassistent"));
+/** Mails of the app itself (the admin's test mail), through the same SMTP settings as the account mails. */
+const mailSender = createSmtpSender(smtpSettings);
+
+/**
+ * Sends a test mail with the saved SMTP settings to the signed-in admin. settings.smtp_missing without a usable
+ * configuration, settings.test_mail_failed with the server's answer as detail when sending fails.
+ */
+export async function sendSmtpTestMail(to: string): Promise<void> {
+  if (!(await mailSender.configured())) throw new HttpError(400, "settings.smtp_missing");
+  try {
+    await mailSender.send({
+      to,
+      subject: "Sprachassistent: Test-Mail",
+      text: "Diese Test-Mail kommt aus dem Adminbereich. Der Mailversand ist richtig eingerichtet.",
+    });
+  } catch (error) {
+    throw new HttpError(502, "settings.test_mail_failed", error instanceof Error ? error.message : String(error));
+  }
+}
 const mailer: AuthMailer = {
   ...smtpMailer,
   sendVerification: async (input) => {

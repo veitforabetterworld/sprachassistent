@@ -8,9 +8,15 @@ import {
   type VeitSettingsGroup,
   type VeitSettingsValues,
 } from "@veit/react-app-settings";
-import { VeitAlert, VeitPage, VeitSpinner } from "@veit/react-controls";
-import { errorText, settingsClient } from "../../api";
+import { VeitAlert, VeitPage } from "@veit/react-controls";
+import { adminApi, codeText, errorDetail, errorText, settingsClient } from "../../api";
 import { useI18n } from "../../i18n/I18nProvider";
+
+/** The test mail's error with what the mail server said, so a wrong password or port shows up. */
+function testMailErrorText(error: unknown): string {
+  const detail = errorDetail(error);
+  return detail ? `${errorText(error)} (${detail})` : errorText(error);
+}
 
 /** Admin settings (@veit/app-settings): e-mail, Google sign-in for tools, speech. */
 export function SettingsPage() {
@@ -24,7 +30,7 @@ export function SettingsPage() {
 
   const groups = useMemo<VeitSettingsGroup[]>(
     () => [
-      veitSmtpSettingsGroup(veitSmtpSettingsTexts[locale]),
+      veitSmtpSettingsGroup(veitSmtpSettingsTexts[locale], { onTestMail: adminApi.testMail, errorText: testMailErrorText }),
       {
         id: "tools",
         title: t("toolsTitle"),
@@ -57,18 +63,17 @@ export function SettingsPage() {
   return (
     <VeitPage width="narrow">
       {error && <VeitAlert>{error}</VeitAlert>}
-      {/* values is typed non-null in VeitSettingsGroupsProps (intersection with the dialog props), so the page waits. */}
-      {values === null ? (
-        !error && <VeitSpinner label={t("loading")} />
-      ) : (
+      {/* null while loading: the list shows a spinner. Field errors of the server stand at the field. */}
+      {!(error && values === null) && (
         <VeitSettingsGroups
-          title={t("settingsTitle")}
-          groups={groups}
-          values={values}
-          texts={veitSettingsGroupsTexts[locale]}
-          errorText={errorText}
-          onSave={async (patch) => setValues(await settingsClient.save(patch))}
-          onReveal={settingsClient.reveal}
+        title={t("settingsTitle")}
+        groups={groups}
+        values={values}
+        texts={veitSettingsGroupsTexts[locale]}
+        errorText={errorText}
+        fieldErrorText={codeText}
+        onSave={async (patch) => setValues(await settingsClient.save(patch))}
+        onReveal={settingsClient.reveal}
         />
       )}
     </VeitPage>

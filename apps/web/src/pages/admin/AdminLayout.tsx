@@ -5,12 +5,13 @@ import { AppShell, VeitSpinner } from "@veit/react-controls";
 import { useI18n } from "../../i18n/I18nProvider";
 import { Layout } from "../Layout";
 
-/** Signed-in pages; without a session to the login, which returns here afterwards (router state). */
+/** Signed-in pages; without a session to /anmelden?next=…, which returns here afterwards (also after a reload). */
 export function SignedIn({ children }: { children: ReactNode }) {
   const { t } = useI18n();
   return (
     <ProtectedRoute
       loginPath="/anmelden"
+      nextParam="next"
       loadingFallback={
         <AppShell variant="center">
           <VeitSpinner size="lg" label={t("loading")} />

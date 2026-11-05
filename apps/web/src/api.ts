@@ -121,6 +121,8 @@ export const adminApi = {
   approveUser: (id: string) => admin<AdminAccount>(`/users/${id}/approve`, "POST", {}),
   resetUserPassword: (id: string) => admin<{ ok: boolean }>(`/users/${id}/password-reset`, "POST", {}),
   deleteUser: (id: string) => admin<null>(`/users/${id}`, "DELETE"),
+  /** Test mail with the saved SMTP settings to the signed-in admin. */
+  testMail: () => admin<{ ok: boolean }>("/settings/test-mail", "POST", {}),
 
   providers: async () => (await admin<{ providers: Provider[] }>("/providers")).providers,
   createProvider: (input: ProviderInput) => admin<Provider>("/providers", "POST", input),

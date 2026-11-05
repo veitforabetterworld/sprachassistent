@@ -8,6 +8,7 @@ import {
   listAccounts,
   removeAccount,
   sendResetLink,
+  sendSmtpTestMail,
   setVerificationRequired,
   verificationRequired,
 } from "./accounts.js";
@@ -155,7 +156,18 @@ export function adminRouter(): Router {
     }),
   );
 
-  // GET/PUT /settings and GET /settings/:key/secret (masked list, reveal of a stored password).
+  // Test mail with the saved SMTP settings to the signed-in admin (button in the e-mail group).
+  router.post(
+    "/settings/test-mail",
+    handle(async (req, res) => {
+      const actor = getAuthUser(req);
+      if (!actor) throw new HttpError(401, "auth.unauthenticated");
+      await sendSmtpTestMail(actor.email);
+      res.json({ ok: true });
+    }),
+  );
+
+  // GET/PUT /settings and GET /settings/:key/secret (masked list, reveal of a stored password, null deletes a secret).
   router.use(
     "/settings",
     createAppSettingsRouter({
