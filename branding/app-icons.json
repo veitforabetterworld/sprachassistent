@@ -1,0 +1,4 @@
+{
+  "source": "logo.svg",
+  "web": { "out": "../apps/web/public", "icon": "full" }
+}

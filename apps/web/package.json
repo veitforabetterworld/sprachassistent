@@ -5,11 +5,12 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "pnpm icons && vite",
+    "build": "pnpm icons && tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "node scripts/no-custom-css.mjs && node ../../veit-framework/scripts/check-page-loc.mjs --root src/pages --warn 600 --fail 1000 && node ../../veit-framework/scripts/check-i18n-hardcodes.mjs && node ../../veit-framework/scripts/check-i18n-literals.mjs && node ../../veit-framework/scripts/check-sheet-dismiss.mjs && tsc -b --noEmit",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "icons": "veit-app-icons --config ../../branding/app-icons.json --only web"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -34,6 +35,7 @@
     "@eslint/js": "^9.17.0",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
+    "@veit/app-icons": "workspace:*",
     "@vitejs/plugin-react": "^4.3.4",
     "eslint": "^9.17.0",
     "eslint-plugin-react-hooks": "^5.1.0",

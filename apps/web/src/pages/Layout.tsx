@@ -48,7 +48,9 @@ export function Layout({ children }: { children: ReactNode }) {
       <VeitAppHeader
         className="shrink-0"
         brand={
-          <Link to={user ? "/chatbots" : "/konto"} className="text-inherit no-underline">
+          <Link to={user ? "/chatbots" : "/konto"} className="flex items-center gap-2 text-inherit no-underline">
+            {/* From branding/logo.svg (veit-app-icons). */}
+            <img src="/app-icon.svg" alt="" className="size-7 rounded-md" />
             <strong className="text-base">{t("appName")}</strong>
           </Link>
         }

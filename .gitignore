@@ -26,3 +26,9 @@ dist/
 apps/web/.vite/
 
 .claude/settings.local.json
+
+# Aus branding/logo.svg erzeugt (veit-app-icons, läuft in dev/build)
+apps/web/public/app-*.svg
+apps/web/public/favicon.*
+apps/web/public/apple-touch-icon.png
+apps/web/public/icon-*.png
