@@ -33,12 +33,10 @@ corepack enable
 pnpm install --frozen-lockfile --filter "@sprachassistent/api..."
 
 log "Datenbank sichern"
-# data/ is excluded from the rsync; the last 10 dumps are kept.
-mkdir -p data/backups
+# Full backup (database plus .env with CREDENTIALS_KEY) before migrating; a failed backup aborts the deploy.
 DATABASE_URL="$(sed -n 's/^DATABASE_URL=//p' .env | tail -n1)"
-pg_dump -Fc --dbname="$DATABASE_URL" -f "data/backups/sprachassistent-$(date +%Y%m%d-%H%M%S).dump"
-ls -1t data/backups/*.dump | tail -n +11 | xargs -r rm -f
-log "$(ls -1t data/backups/*.dump | head -1) ($(du -h "$(ls -1t data/backups/*.dump | head -1)" | cut -f1))"
+bash veit-framework/scripts/deploy/backup-before-migrate.sh \
+  --name sprachassistent --database-url "$DATABASE_URL" --include .env
 
 log "Datenbank migrieren"
 # Before the restart: the servers refuse to start while a migration is missing.
